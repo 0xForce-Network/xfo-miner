@@ -43,8 +43,10 @@ type Scheduler struct {
 	poolClient   pool.Client
 	logger       *slog.Logger
 
-	stateMu sync.RWMutex
-	state   State
+	stateMu      sync.RWMutex
+	state        State
+	poolStatusMu sync.RWMutex
+	poolStatus   string
 
 	hashcatRunner   hashcatRunner
 	containerRunner containerRunner
@@ -144,10 +146,22 @@ func (s *Scheduler) CurrentState() State {
 	return s.state
 }
 
+func (s *Scheduler) CurrentPoolStatus() string {
+	s.poolStatusMu.RLock()
+	defer s.poolStatusMu.RUnlock()
+	return s.poolStatus
+}
+
 func (s *Scheduler) setState(state State) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	s.state = state
+}
+
+func (s *Scheduler) setPoolStatus(status string) {
+	s.poolStatusMu.Lock()
+	defer s.poolStatusMu.Unlock()
+	s.poolStatus = status
 }
 
 func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
@@ -170,6 +184,40 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 		if err := s.enterAIContainer(ctx, &job); err != nil {
 			s.logger.Error("failed AI_CONTAINER", "error", err)
 		}
+	case "pool_status":
+		var st pool.PoolStatusMessage
+		if err := json.Unmarshal(msg.raw, &st); err != nil {
+			s.logger.Warn("invalid pool_status message", "error", err)
+			return
+		}
+		s.handlePoolStatus(ctx, st.Status)
+	case "login_ack":
+		var ack pool.LoginAckMessage
+		if err := json.Unmarshal(msg.raw, &ack); err != nil {
+			s.logger.Warn("invalid login_ack message", "error", err)
+			return
+		}
+		s.handlePoolStatus(ctx, ack.Status)
+	}
+}
+
+func (s *Scheduler) handlePoolStatus(ctx context.Context, status string) {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		s.logger.Warn("received empty pool status")
+		return
+	}
+	s.setPoolStatus(status)
+
+	switch status {
+	case pool.PoolStatusAwaitingGenesis, pool.PoolStatusUnarmed:
+		if err := s.enterStandby(ctx); err != nil {
+			s.logger.Warn("failed to enforce standby for pool status", "status", status, "error", err)
+		}
+	case pool.PoolStatusArmed:
+		s.logger.Info("pool status armed; awaiting jobs")
+	default:
+		s.logger.Warn("unknown pool status", "status", status)
 	}
 }
 

@@ -2,6 +2,12 @@ package pool
 
 import "encoding/json"
 
+const (
+	PoolStatusAwaitingGenesis = "AWAITING_GENESIS"
+	PoolStatusUnarmed         = "UNARMED"
+	PoolStatusArmed           = "ARMED"
+)
+
 type CapabilitiesData struct {
 	HasGPU         bool    `json:"has_gpu"`
 	GPUCount       int     `json:"gpu_count"`
@@ -71,6 +77,11 @@ type JobContainerMessage struct {
 }
 
 type PoolStatusMessage struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+}
+
+type LoginAckMessage struct {
 	Type   string `json:"type"`
 	Status string `json:"status"`
 }

@@ -203,3 +203,27 @@ func TestSchedulerReturnsToStandbyAfterJob(t *testing.T) {
 		t.Fatalf("expected standby after job, got %s", s.CurrentState())
 	}
 }
+
+func TestSchedulerHandlesPoolStatus(t *testing.T) {
+	s, proc, pcl := newTestScheduler()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return proc.startCount("idle_miner") >= 1 })
+
+	pcl.emit(pool.PoolStatusMessage{Type: "pool_status", Status: pool.PoolStatusAwaitingGenesis})
+	waitFor(t, func() bool { return s.CurrentPoolStatus() == pool.PoolStatusAwaitingGenesis })
+	if s.CurrentState() != StateStandby {
+		t.Fatalf("expected standby on awaiting_genesis, got %s", s.CurrentState())
+	}
+
+	pcl.emit(pool.LoginAckMessage{Type: "login_ack", Status: pool.PoolStatusArmed})
+	waitFor(t, func() bool { return s.CurrentPoolStatus() == pool.PoolStatusArmed })
+
+	pcl.emit(pool.PoolStatusMessage{Type: "pool_status", Status: pool.PoolStatusUnarmed})
+	waitFor(t, func() bool { return s.CurrentPoolStatus() == pool.PoolStatusUnarmed })
+	if s.CurrentState() != StateStandby {
+		t.Fatalf("expected standby on unarmed, got %s", s.CurrentState())
+	}
+}
