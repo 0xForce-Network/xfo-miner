@@ -21,12 +21,14 @@ type SystemCapabilities struct {
 	HasDocker      bool
 	AIReady        bool
 	BenchmarkKHs   float64
+	IsRoot         bool
 	RunMode        string
 }
 
 func ProbeAll(ctx context.Context) (*SystemCapabilities, error) {
 	caps := &SystemCapabilities{RunMode: RunModeCPUOnly}
 	warnings := make([]error, 0)
+	caps.IsRoot = CheckRoot()
 
 	gpus, gpuErr := DetectGPU(ctx)
 	if gpuErr != nil {

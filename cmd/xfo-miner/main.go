@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/0xforce/xfo-miner/internal/config"
@@ -71,11 +73,21 @@ func main() {
 		"run_mode", capabilities.RunMode,
 	)
 
-	s := scheduler.New(cfg, capabilities, process.NewRealManager(logger), pool.NewNoopClient(), logger)
-	if err := s.Run(context.Background()); err != nil {
+	if !capabilities.IsRoot {
+		logger.Warn("miner is not running with root/admin privileges; some features may be unavailable")
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	poolClient := pool.NewWSSClient(logger)
+	s := scheduler.New(cfg, capabilities, process.NewRealManager(logger), poolClient, logger)
+	if err := s.Run(ctx); err != nil {
 		logger.Error("scheduler exited with error", "error", err)
 		os.Exit(1)
 	}
+
+	logger.Info("scheduler stopped gracefully")
 }
 
 func printBanner(logger *slog.Logger) {
