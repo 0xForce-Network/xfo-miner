@@ -1,0 +1,15 @@
+# Compiled binaries
+bin/
+xfo-miner
+*.exe
+*.tar.gz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

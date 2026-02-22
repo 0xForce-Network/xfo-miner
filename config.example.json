@@ -1,0 +1,18 @@
+{
+  "node_id": "XFo2A88...9abc",
+  "worker_name": "Rig-4090-Alpha",
+  "pool_url": "wss://pool.xfo.network/api/v1/stream",
+  "max_cpu_threads": 4,
+  "cpu_mining": {
+    "enabled": true,
+    "xmrig_path": "./bin/xmrig",
+    "max_threads": 12,
+    "background_threads": 1
+  },
+  "idle_behavior": {
+    "enabled": true,
+    "grace_period_sec": 5,
+    "command": "./bin/t-rex",
+    "args": "-a kawpow -o stratum+tcp://rvn.pool.com:1234 -u WALLET -p x"
+  }
+}
