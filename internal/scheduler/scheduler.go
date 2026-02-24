@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/0xforce/xfo-miner/internal/env"
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
+	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
 type State string
@@ -31,6 +33,10 @@ type containerRunner interface {
 	Run(context.Context, *pool.JobContainerMessage) (string, error)
 }
 
+type otaUpdater interface {
+	Execute(context.Context, *pool.OTAUpdateMessage) error
+}
+
 type inboundMessage struct {
 	msgType string
 	raw     json.RawMessage
@@ -38,6 +44,7 @@ type inboundMessage struct {
 
 type Scheduler struct {
 	cfg          *config.Config
+	version      string
 	capabilities *env.SystemCapabilities
 	procManager  process.Manager
 	poolClient   pool.Client
@@ -51,16 +58,18 @@ type Scheduler struct {
 	hashcatRunner   hashcatRunner
 	containerRunner containerRunner
 	xmrigManager    xmrigController
+	updater         otaUpdater
 	messageCh       chan inboundMessage
 }
 
-func New(cfg *config.Config, capabilities *env.SystemCapabilities, procManager process.Manager, poolClient pool.Client, logger *slog.Logger) *Scheduler {
+func New(cfg *config.Config, version string, capabilities *env.SystemCapabilities, procManager process.Manager, poolClient pool.Client, logger *slog.Logger) *Scheduler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	s := &Scheduler{
 		cfg:          cfg,
+		version:      version,
 		capabilities: capabilities,
 		procManager:  procManager,
 		poolClient:   poolClient,
@@ -71,6 +80,12 @@ func New(cfg *config.Config, capabilities *env.SystemCapabilities, procManager p
 
 	s.hashcatRunner = NewHashcatRunner(procManager, logger)
 	s.containerRunner = NewContainerRunner(procManager, logger)
+	up, err := updater.New(logger)
+	if err != nil {
+		s.logger.Error("failed to initialize OTA updater", "error", err)
+	} else {
+		s.updater = up
+	}
 	if cfg.CPUMining.Enabled {
 		s.xmrigManager = NewXMRigManager(procManager, &cfg.CPUMining, cfg.PoolURL, cfg.NodeID, cfg.WorkerName, logger)
 	} else {
@@ -99,6 +114,8 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		Type:       "login",
 		NodeID:     s.cfg.NodeID,
 		WorkerName: s.cfg.WorkerName,
+		Version:    s.version,
+		OS:         runtime.GOOS + "-" + runtime.GOARCH,
 		Capabilities: &pool.CapabilitiesData{
 			HasGPU:         s.capabilities.HasGPU,
 			GPUCount:       len(s.capabilities.GPUs),
@@ -198,7 +215,45 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 			return
 		}
 		s.handlePoolStatus(ctx, ack.Status)
+	case "update_required":
+		var ota pool.OTAUpdateMessage
+		if err := json.Unmarshal(msg.raw, &ota); err != nil {
+			s.logger.Warn("invalid update_required message", "error", err)
+			return
+		}
+		s.handleOTAUpdate(ctx, &ota)
 	}
+}
+
+func (s *Scheduler) handleOTAUpdate(_ context.Context, ota *pool.OTAUpdateMessage) {
+	if !s.cfg.AutoUpdate.Enabled {
+		s.logger.Warn("OTA update available but auto_update is disabled", "latest_version", ota.LatestVersion)
+		return
+	}
+
+	if s.updater == nil {
+		s.logger.Error("OTA update requested but updater is not initialized", "latest_version", ota.LatestVersion)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	if err := s.stopIdleMiner(ctx); err != nil {
+		s.logger.Error("failed to stop idle miner before OTA", "error", err)
+	}
+	if err := s.xmrigManager.SetHeartbeatMode(ctx); err != nil {
+		s.logger.Error("failed to set xmrig heartbeat mode before OTA", "error", err)
+	}
+
+	s.logger.Info("executing OTA update", "latest_version", ota.LatestVersion, "download_urls", ota.DownloadURLs)
+	if err := s.updater.Execute(ctx, ota); err != nil {
+		s.logger.Error("OTA update failed", "error", err)
+		s.restoreStandby(context.Background())
+		return
+	}
+
+	s.logger.Info("OTA update applied, process handoff should occur")
 }
 
 func (s *Scheduler) handlePoolStatus(ctx context.Context, status string) {

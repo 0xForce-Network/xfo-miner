@@ -16,6 +16,7 @@ import (
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
 	"github.com/0xforce/xfo-miner/internal/scheduler"
+	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
 const version = "0.1.0"
@@ -26,6 +27,9 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	printBanner(logger)
+	if err := updater.CleanupOldBinary(); err != nil {
+		logger.Warn("failed to cleanup old OTA binary artifact", "error", err)
+	}
 
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
@@ -81,7 +85,7 @@ func main() {
 	defer cancel()
 
 	poolClient := pool.NewWSSClient(logger)
-	s := scheduler.New(cfg, capabilities, process.NewRealManager(logger), poolClient, logger)
+	s := scheduler.New(cfg, version, capabilities, process.NewRealManager(logger), poolClient, logger)
 	if err := s.Run(ctx); err != nil {
 		logger.Error("scheduler exited with error", "error", err)
 		os.Exit(1)

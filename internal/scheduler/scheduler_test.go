@@ -65,11 +65,22 @@ type mockPoolClient struct {
 	mu        sync.Mutex
 	handler   func(string, json.RawMessage)
 	connected bool
+	lastLogin *pool.LoginMessage
 }
 
 func (m *mockPoolClient) Connect(_ context.Context, _ string) error              { m.connected = true; return nil }
 func (m *mockPoolClient) Close() error                                           { return nil }
-func (m *mockPoolClient) SendLogin(_ *pool.LoginMessage) error                   { return nil }
+func (m *mockPoolClient) SendLogin(login *pool.LoginMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if login == nil {
+		m.lastLogin = nil
+		return nil
+	}
+	copy := *login
+	m.lastLogin = &copy
+	return nil
+}
 func (m *mockPoolClient) SendHeartbeat() error                                   { return nil }
 func (m *mockPoolClient) SendProgress(_ *pool.ProgressMessage) error             { return nil }
 func (m *mockPoolClient) SendResult(_ *pool.ResultMessage) error                 { return nil }
@@ -93,6 +104,16 @@ func (m *mockPoolClient) emit(v any) {
 	}
 }
 
+func (m *mockPoolClient) getLastLogin() *pool.LoginMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastLogin == nil {
+		return nil
+	}
+	copy := *m.lastLogin
+	return &copy
+}
+
 type mockHashcatRunner struct{}
 
 func (m *mockHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage, onProgress func(*pool.ProgressMessage), onResult func(*pool.ResultMessage)) error {
@@ -111,6 +132,24 @@ func (m *mockContainerRunner) Run(_ context.Context, _ *pool.JobContainerMessage
 	return "https://abc.trycloudflare.com", nil
 }
 
+type mockOTAUpdater struct {
+	mu     sync.Mutex
+	called int
+}
+
+func (m *mockOTAUpdater) Execute(_ context.Context, _ *pool.OTAUpdateMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.called++
+	return nil
+}
+
+func (m *mockOTAUpdater) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.called
+}
+
 func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient) {
 	proc := newMockProcessManager()
 	pcl := &mockPoolClient{}
@@ -120,6 +159,7 @@ func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient) {
 		NodeID:     "node-1",
 		WorkerName: "worker-1",
 		PoolURL:    "wss://pool.example/ws",
+		AutoUpdate: config.AutoUpdateConfig{Enabled: true},
 		CPUMining: config.CPUMiningConfig{
 			Enabled:           false,
 			XMRigPath:         "./bin/xmrig",
@@ -132,10 +172,11 @@ func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient) {
 			Command:        "idle-miner",
 			Args:           "--x",
 		},
-	}, &env.SystemCapabilities{RunMode: env.RunModeCPUOnly}, proc, pcl, logger)
+	}, "0.1.0-test", &env.SystemCapabilities{RunMode: env.RunModeCPUOnly}, proc, pcl, logger)
 
 	s.hashcatRunner = &mockHashcatRunner{}
 	s.containerRunner = &mockContainerRunner{}
+	s.updater = &mockOTAUpdater{}
 	return s, proc, pcl
 }
 
@@ -226,4 +267,47 @@ func TestSchedulerHandlesPoolStatus(t *testing.T) {
 	if s.CurrentState() != StateStandby {
 		t.Fatalf("expected standby on unarmed, got %s", s.CurrentState())
 	}
+}
+
+func TestSchedulerLoginCarriesVersionAndOS(t *testing.T) {
+	s, _, pcl := newTestScheduler()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+
+	waitFor(t, func() bool { return pcl.getLastLogin() != nil })
+	login := pcl.getLastLogin()
+	if login == nil {
+		t.Fatalf("expected login payload")
+	}
+	if login.Version != "0.1.0-test" {
+		t.Fatalf("unexpected version: got %q", login.Version)
+	}
+	if login.OS == "" {
+		t.Fatalf("expected non-empty os")
+	}
+}
+
+func TestSchedulerHandlesOTAUpdateRequired(t *testing.T) {
+	s, proc, pcl := newTestScheduler()
+	mockUpdater, ok := s.updater.(*mockOTAUpdater)
+	if !ok {
+		t.Fatalf("expected mock ota updater")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return proc.startCount("idle_miner") >= 1 })
+
+	pcl.emit(pool.OTAUpdateMessage{
+		Type:          "update_required",
+		LatestVersion: "0.2.0",
+		DownloadURLs:  []string{"https://example.com/xfo-miner"},
+		Checksum:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+
+	waitFor(t, func() bool { return mockUpdater.callCount() >= 1 })
 }

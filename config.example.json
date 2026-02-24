@@ -3,6 +3,9 @@
   "worker_name": "Rig-4090-Alpha",
   "pool_url": "wss://pool.xfo.network/api/v1/stream",
   "max_cpu_threads": 4,
+  "auto_update": {
+    "enabled": true
+  },
   "cpu_mining": {
     "enabled": true,
     "xmrig_path": "./bin/xmrig",

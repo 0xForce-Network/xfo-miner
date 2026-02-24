@@ -17,8 +17,13 @@ type Config struct {
 	WorkerName    string          `json:"worker_name"`
 	PoolURL       string          `json:"pool_url"`
 	MaxCPUThreads int             `json:"max_cpu_threads"`
+	AutoUpdate    AutoUpdateConfig `json:"auto_update"`
 	IdleBehavior  IdleBehavior    `json:"idle_behavior"`
 	CPUMining     CPUMiningConfig `json:"cpu_mining"`
+}
+
+type AutoUpdateConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 type IdleBehavior struct {

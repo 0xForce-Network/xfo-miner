@@ -17,6 +17,9 @@ func TestLoadConfigAppliesDefaultCPUThreads(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 0,
+	  "auto_update": {
+	    "enabled": true
+	  },
 	  "idle_behavior": {
 	    "enabled": false,
 	    "grace_period_sec": 0,
@@ -53,6 +56,9 @@ func TestLoadConfigValidationErrors(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "http://pool.example.com/ws",
 	  "max_cpu_threads": 1,
+	  "auto_update": {
+	    "enabled": false
+	  },
 	  "idle_behavior": {
 	    "enabled": false,
 	    "grace_period_sec": 0,
@@ -80,6 +86,9 @@ func TestLoadConfigCPUMiningDefaults(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 4,
+	  "auto_update": {
+	    "enabled": true
+	  },
 	  "cpu_mining": {
 	    "enabled": true,
 	    "xmrig_path": "./bin/xmrig",
@@ -121,6 +130,9 @@ func TestLoadConfigCPUMiningValidationBackgroundMinimum(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 4,
+	  "auto_update": {
+	    "enabled": true
+	  },
 	  "cpu_mining": {
 	    "enabled": true,
 	    "xmrig_path": "./bin/xmrig",
@@ -154,6 +166,9 @@ func TestLoadConfigCPUMiningValidationMaxGTEBackground(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 4,
+	  "auto_update": {
+	    "enabled": true
+	  },
 	  "cpu_mining": {
 	    "enabled": true,
 	    "xmrig_path": "./bin/xmrig",

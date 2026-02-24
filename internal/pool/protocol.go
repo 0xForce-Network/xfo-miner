@@ -26,6 +26,8 @@ type LoginMessage struct {
 	Type         string            `json:"type"`
 	NodeID       string            `json:"node_id"`
 	WorkerName   string            `json:"worker_name"`
+	Version      string            `json:"version"`
+	OS           string            `json:"os"`
 	Capabilities *CapabilitiesData `json:"capabilities"`
 }
 
@@ -84,4 +86,11 @@ type PoolStatusMessage struct {
 type LoginAckMessage struct {
 	Type   string `json:"type"`
 	Status string `json:"status"`
+}
+
+type OTAUpdateMessage struct {
+	Type          string   `json:"type"`
+	LatestVersion string   `json:"latest_version"`
+	DownloadURLs  []string `json:"download_urls"`
+	Checksum      string   `json:"checksum"`
 }
