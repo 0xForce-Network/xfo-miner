@@ -1,23 +1,23 @@
 # xfo-miner
 
-`xfo-miner` 是 0xForce 的算力编排客户端（BYOH: Bring Your Own Hashcat/Hardware）。
+`xfo-miner` is the 0xForce compute orchestration client (BYOH: Bring Your Own Hashcat/Hardware).
 
-客户端负责：
-- 环境自检（GPU / Hashcat / Docker / Nvidia Container Toolkit）
-- 与矿池 WebSocket 通信（登录、心跳、任务消息、结果回传）
-- 智能调度状态机（`PRE_HEAT_STANDBY` / `WPA_AUDIT` / `AI_CONTAINER`）
-- 受控子进程生命周期管理（启动、流式日志、SIGTERM→SIGKILL）
+The client is responsible for:
+- Environment self-check (GPU / Hashcat / Docker / Nvidia Container Toolkit)
+- WebSocket communication with the mining pool (login, heartbeat, task messages, result submission)
+- Smart scheduling state machine (`PRE_HEAT_STANDBY` / `WPA_AUDIT` / `AI_CONTAINER`)
+- Managed subprocess lifecycle (start, streaming logs, SIGTERM→SIGKILL)
 
 ## System Requirements
 
 - Go 1.22+
-- 可选依赖（按运行模式）
+- Optional dependencies (by run mode):
   - `hashcat`
   - `docker`
   - `cloudflared`
-  - GPU 驱动工具：`nvidia-smi` 或 `clinfo`
+  - GPU driver tools: `nvidia-smi` or `clinfo`
 
-依赖缺失时会自动降级至 `CPU_ONLY`，不会崩溃退出。
+Missing dependencies will cause automatic degradation to `CPU_ONLY` mode without crashing.
 
 ## Quick Start
 
@@ -31,12 +31,12 @@ go run ./cmd/xfo-miner -config ./config.json
 ```bash
 make build        # linux/amd64
 make build-all    # linux/windows/darwin
-make package      # 生成 .tar.gz/.zip
-make checksums    # 生成 SHA256SUMS
-make release      # clean + checksums（完整发布流程）
+make package      # generate .tar.gz/.zip
+make checksums    # generate SHA256SUMS
+make release      # clean + checksums (full release workflow)
 ```
 
-发布产物输出到 `bin/`：
+Release artifacts are output to `bin/`:
 
 - `xfo-miner-linux-amd64`
 - `xfo-miner-windows-amd64.exe`
@@ -48,34 +48,34 @@ make release      # clean + checksums（完整发布流程）
 
 ## Config
 
-配置结构遵循 `docs/miner/0xforce_miner_specs.md` §4。
+Configuration structure follows `docs/miner/0xforce_miner_specs.md` §4.
 
-字段说明：
-- `node_id`：节点标识（必填）
-- `worker_name`：工作节点名称（必填）
-- `pool_url`：矿池地址（必填，必须 `wss://`）
-- `max_cpu_threads`：CPU 线程上限（可选，默认 `runtime.NumCPU()/2`，最小 1）
-- `idle_behavior`：空闲状态子进程配置
-  - `enabled`：是否启用 idle miner
-  - `grace_period_sec`：停止 idle miner 的宽限秒数
-  - `command`：idle miner 可执行命令
-  - `args`：idle miner 参数字符串
+Field descriptions:
+- `node_id`: Node identifier (required)
+- `worker_name`: Worker node name (required)
+- `pool_url`: Pool address (required, must be `wss://`)
+- `max_cpu_threads`: CPU thread limit (optional, defaults to `runtime.NumCPU()/2`, minimum 1)
+- `idle_behavior`: Idle state subprocess configuration
+  - `enabled`: Whether to enable idle miner
+  - `grace_period_sec`: Grace period in seconds before stopping idle miner
+  - `command`: Idle miner executable command
+  - `args`: Idle miner argument string
 
-详见：`docs/config_reference.md`。
+See: `docs/config_reference.md`.
 
 ## Run Modes
 
-- `GPU_FULL`：GPU + Hashcat + Docker + NVIDIA 容器能力齐备
-- `GPU_HASHCAT_ONLY`：GPU + Hashcat 可用，但容器能力不足
-- `CPU_ONLY`：其余情况（优雅降级）
+- `GPU_FULL`: GPU + Hashcat + Docker + NVIDIA container capabilities all available
+- `GPU_HASHCAT_ONLY`: GPU + Hashcat available, but container capabilities insufficient
+- `CPU_ONLY`: All other cases (graceful degradation)
 
 ## Scheduler States
 
-- `PRE_HEAT_STANDBY`：运行 idle miner，等待任务
-- `WPA_AUDIT`：停止 idle miner，执行 Hashcat 任务，上报进度/结果
-- `AI_CONTAINER`：停止 idle miner，拉起容器与隧道，上报临时 URL
+- `PRE_HEAT_STANDBY`: Running idle miner, waiting for tasks
+- `WPA_AUDIT`: Stops idle miner, executes Hashcat task, reports progress/results
+- `AI_CONTAINER`: Stops idle miner, launches container and tunnel, reports temporary URL
 
-状态迁移：
+State transitions:
 - `STANDBY -> WPA_AUDIT -> STANDBY`
 - `STANDBY -> AI_CONTAINER -> STANDBY`
 
