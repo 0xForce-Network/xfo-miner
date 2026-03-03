@@ -21,6 +21,8 @@ type Client interface {
 	SendProgress(msg *ProgressMessage) error
 	SendResult(msg *ResultMessage) error
 	SendContainerReady(msg *ContainerReadyMessage) error
+	SendTelemetryL1(msg *TelemetryL1Message) error
+	SendTelemetryL2(msg *TelemetryL2Message) error
 	OnMessage(handler func(msgType string, raw json.RawMessage))
 }
 
@@ -303,6 +305,26 @@ func (c *WSSClient) SendContainerReady(msg *ContainerReadyMessage) error {
 	return c.enqueue(msg)
 }
 
+func (c *WSSClient) SendTelemetryL1(msg *TelemetryL1Message) error {
+	if msg == nil {
+		return errors.New("telemetry l1 message is nil")
+	}
+	if msg.Type == "" {
+		msg.Type = "telemetry_l1"
+	}
+	return c.enqueue(msg)
+}
+
+func (c *WSSClient) SendTelemetryL2(msg *TelemetryL2Message) error {
+	if msg == nil {
+		return errors.New("telemetry l2 message is nil")
+	}
+	if msg.Type == "" {
+		msg.Type = "telemetry_l2"
+	}
+	return c.enqueue(msg)
+}
+
 func (c *WSSClient) enqueue(msg any) error {
 	payload, err := json.Marshal(msg)
 	if err != nil {
@@ -401,6 +423,14 @@ func (c *NoopClient) SendResult(_ *ResultMessage) error {
 }
 
 func (c *NoopClient) SendContainerReady(_ *ContainerReadyMessage) error {
+	return nil
+}
+
+func (c *NoopClient) SendTelemetryL1(_ *TelemetryL1Message) error {
+	return nil
+}
+
+func (c *NoopClient) SendTelemetryL2(_ *TelemetryL2Message) error {
 	return nil
 }
 

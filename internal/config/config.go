@@ -13,13 +13,20 @@ import (
 
 // Config maps specs §4 config.json.
 type Config struct {
-	NodeID        string          `json:"node_id"`
-	WorkerName    string          `json:"worker_name"`
-	PoolURL       string          `json:"pool_url"`
-	MaxCPUThreads int             `json:"max_cpu_threads"`
+	NodeID        string           `json:"node_id"`
+	WorkerName    string           `json:"worker_name"`
+	PoolURL       string           `json:"pool_url"`
+	MaxCPUThreads int              `json:"max_cpu_threads"`
+	Multisig      MultisigConfig   `json:"multisig"`
 	AutoUpdate    AutoUpdateConfig `json:"auto_update"`
-	IdleBehavior  IdleBehavior    `json:"idle_behavior"`
-	CPUMining     CPUMiningConfig `json:"cpu_mining"`
+	IdleBehavior  IdleBehavior     `json:"idle_behavior"`
+	CPUMining     CPUMiningConfig  `json:"cpu_mining"`
+}
+
+type MultisigConfig struct {
+	Enabled      bool   `json:"enabled"`
+	WalletRPCURL string `json:"wallet_rpc_url"`
+	OracleAPIURL string `json:"oracle_api_url"`
 }
 
 type AutoUpdateConfig struct {
@@ -125,6 +132,17 @@ func (c *Config) Validate() error {
 		}
 		if c.CPUMining.MaxThreads < c.CPUMining.BackgroundThreads {
 			validationErrs = append(validationErrs, errors.New("cpu_mining.max_threads must be >= cpu_mining.background_threads"))
+		}
+	}
+
+	if c.Multisig.Enabled {
+		rpcURL, err := url.Parse(c.Multisig.WalletRPCURL)
+		if err != nil || rpcURL.Host == "" || (rpcURL.Scheme != "http" && rpcURL.Scheme != "https") {
+			validationErrs = append(validationErrs, errors.New("multisig.wallet_rpc_url must be a valid http(s) URL when multisig.enabled is true"))
+		}
+		oracleURL, err := url.Parse(c.Multisig.OracleAPIURL)
+		if err != nil || oracleURL.Host == "" || (oracleURL.Scheme != "http" && oracleURL.Scheme != "https") {
+			validationErrs = append(validationErrs, errors.New("multisig.oracle_api_url must be a valid http(s) URL when multisig.enabled is true"))
 		}
 	}
 

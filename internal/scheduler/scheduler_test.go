@@ -68,8 +68,8 @@ type mockPoolClient struct {
 	lastLogin *pool.LoginMessage
 }
 
-func (m *mockPoolClient) Connect(_ context.Context, _ string) error              { m.connected = true; return nil }
-func (m *mockPoolClient) Close() error                                           { return nil }
+func (m *mockPoolClient) Connect(_ context.Context, _ string) error { m.connected = true; return nil }
+func (m *mockPoolClient) Close() error                              { return nil }
 func (m *mockPoolClient) SendLogin(login *pool.LoginMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -85,6 +85,8 @@ func (m *mockPoolClient) SendHeartbeat() error                                  
 func (m *mockPoolClient) SendProgress(_ *pool.ProgressMessage) error             { return nil }
 func (m *mockPoolClient) SendResult(_ *pool.ResultMessage) error                 { return nil }
 func (m *mockPoolClient) SendContainerReady(_ *pool.ContainerReadyMessage) error { return nil }
+func (m *mockPoolClient) SendTelemetryL1(_ *pool.TelemetryL1Message) error       { return nil }
+func (m *mockPoolClient) SendTelemetryL2(_ *pool.TelemetryL2Message) error       { return nil }
 func (m *mockPoolClient) OnMessage(h func(msgType string, raw json.RawMessage)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

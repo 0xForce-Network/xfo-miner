@@ -13,9 +13,11 @@ import (
 
 	"github.com/0xforce/xfo-miner/internal/config"
 	"github.com/0xforce/xfo-miner/internal/env"
+	"github.com/0xforce/xfo-miner/internal/multisig"
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
 	"github.com/0xforce/xfo-miner/internal/scheduler"
+	"github.com/0xforce/xfo-miner/internal/telemetry"
 	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
@@ -85,6 +87,17 @@ func main() {
 	defer cancel()
 
 	poolClient := pool.NewWSSClient(logger)
+	if cfg.Multisig.Enabled {
+		_ = multisig.NewStakingManager(multisig.StakingConfig{
+			WalletRPCURL: cfg.Multisig.WalletRPCURL,
+			OracleAPIURL: cfg.Multisig.OracleAPIURL,
+		}, logger)
+		logger.Info("multisig staking manager initialized", "wallet_rpc", cfg.Multisig.WalletRPCURL, "oracle_api", cfg.Multisig.OracleAPIURL)
+	}
+	reporter := telemetry.NewReporter(cfg.NodeID, 30*time.Second, poolClient, logger)
+	go reporter.RunL1Loop(ctx)
+	go reporter.RunL2Loop(ctx)
+
 	s := scheduler.New(cfg, version, capabilities, process.NewRealManager(logger), poolClient, logger)
 	if err := s.Run(ctx); err != nil {
 		logger.Error("scheduler exited with error", "error", err)

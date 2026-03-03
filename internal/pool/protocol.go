@@ -56,6 +56,30 @@ type ContainerReadyMessage struct {
 	URL   string `json:"url"`
 }
 
+type GPUDeviceTelemetry struct {
+	DeviceID        string  `json:"device_id"`
+	GPUModel        string  `json:"gpu_model"`
+	VRAMGB          float64 `json:"vram_gb"`
+	Status          string  `json:"status"`
+	ReputationScore float64 `json:"reputation_score"`
+	PCIBusID        string  `json:"pci_bus_id"`
+	Temperature     int     `json:"temperature_c,omitempty"`
+	Utilization     int     `json:"utilization_pct,omitempty"`
+}
+
+type TelemetryL1Message struct {
+	Type      string  `json:"type"`
+	Hashrate  float64 `json:"hashrate_khs"`
+	Algorithm string  `json:"algorithm"`
+	Threads   int     `json:"threads"`
+}
+
+type TelemetryL2Message struct {
+	Type    string               `json:"type"`
+	Devices []GPUDeviceTelemetry `json:"devices"`
+	JobID   string               `json:"job_id,omitempty"`
+}
+
 // Pool -> Miner
 type ServerMessage struct {
 	Type string          `json:"type"`

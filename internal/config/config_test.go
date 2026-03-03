@@ -17,6 +17,11 @@ func TestLoadConfigAppliesDefaultCPUThreads(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 0,
+	  "multisig": {
+	    "enabled": false,
+	    "wallet_rpc_url": "",
+	    "oracle_api_url": ""
+	  },
 	  "auto_update": {
 	    "enabled": true
 	  },
@@ -56,6 +61,11 @@ func TestLoadConfigValidationErrors(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "http://pool.example.com/ws",
 	  "max_cpu_threads": 1,
+	  "multisig": {
+	    "enabled": false,
+	    "wallet_rpc_url": "",
+	    "oracle_api_url": ""
+	  },
 	  "auto_update": {
 	    "enabled": false
 	  },
@@ -86,6 +96,11 @@ func TestLoadConfigCPUMiningDefaults(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 4,
+	  "multisig": {
+	    "enabled": false,
+	    "wallet_rpc_url": "",
+	    "oracle_api_url": ""
+	  },
 	  "auto_update": {
 	    "enabled": true
 	  },
@@ -130,6 +145,11 @@ func TestLoadConfigCPUMiningValidationBackgroundMinimum(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 4,
+	  "multisig": {
+	    "enabled": false,
+	    "wallet_rpc_url": "",
+	    "oracle_api_url": ""
+	  },
 	  "auto_update": {
 	    "enabled": true
 	  },
@@ -166,6 +186,11 @@ func TestLoadConfigCPUMiningValidationMaxGTEBackground(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 4,
+	  "multisig": {
+	    "enabled": false,
+	    "wallet_rpc_url": "",
+	    "oracle_api_url": ""
+	  },
 	  "auto_update": {
 	    "enabled": true
 	  },
@@ -189,5 +214,46 @@ func TestLoadConfigCPUMiningValidationMaxGTEBackground(t *testing.T) {
 
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatalf("expected validation error when max_threads < background_threads")
+	}
+}
+
+func TestLoadConfigMultisigValidation(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "multisig-invalid.json")
+	content := `{
+	  "node_id": "node-1",
+	  "worker_name": "worker-1",
+	  "pool_url": "wss://pool.example.com/ws",
+	  "max_cpu_threads": 4,
+	  "multisig": {
+	    "enabled": true,
+	    "wallet_rpc_url": "not-a-url",
+	    "oracle_api_url": "also-not-url"
+	  },
+	  "auto_update": {
+	    "enabled": true
+	  },
+	  "cpu_mining": {
+	    "enabled": false,
+	    "xmrig_path": "",
+	    "max_threads": 0,
+	    "background_threads": 0
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatalf("expected validation error for multisig urls")
 	}
 }
