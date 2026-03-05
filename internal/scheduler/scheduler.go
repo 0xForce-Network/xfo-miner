@@ -60,6 +60,10 @@ type Scheduler struct {
 	xmrigManager    xmrigController
 	updater         otaUpdater
 	messageCh       chan inboundMessage
+	idleMinerPid    int
+	startDetached   func(command string, args []string) (*process.DetachedProcess, error)
+	stopDetached    func(pid int, gracePeriod int) error
+	isDetachedAlive func(pid int) bool
 }
 
 func New(cfg *config.Config, version string, capabilities *env.SystemCapabilities, procManager process.Manager, poolClient pool.Client, logger *slog.Logger) *Scheduler {
@@ -68,14 +72,17 @@ func New(cfg *config.Config, version string, capabilities *env.SystemCapabilitie
 	}
 
 	s := &Scheduler{
-		cfg:          cfg,
-		version:      version,
-		capabilities: capabilities,
-		procManager:  procManager,
-		poolClient:   poolClient,
-		logger:       logger,
-		state:        StateStandby,
-		messageCh:    make(chan inboundMessage, 64),
+		cfg:             cfg,
+		version:         version,
+		capabilities:    capabilities,
+		procManager:     procManager,
+		poolClient:      poolClient,
+		logger:          logger,
+		state:           StateStandby,
+		messageCh:       make(chan inboundMessage, 64),
+		startDetached:   process.StartDetached,
+		stopDetached:    process.StopDetached,
+		isDetachedAlive: process.IsProcessRunning,
 	}
 
 	s.hashcatRunner = NewHashcatRunner(procManager, logger)
@@ -142,6 +149,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	}
 
 	defer func() {
+		_ = s.stopIdleMiner(context.Background())
 		_ = s.xmrigManager.Stop(context.Background())
 		_ = s.procManager.StopAll(context.Background(), 2*time.Second)
 		_ = s.poolClient.Close()
@@ -335,25 +343,42 @@ func (s *Scheduler) restoreStandby(ctx context.Context) {
 }
 
 func (s *Scheduler) startIdleMiner(ctx context.Context) error {
+	_ = ctx
 	idle := s.cfg.IdleBehavior
 	if !idle.Enabled || strings.TrimSpace(idle.Command) == "" {
 		return nil
 	}
-	if s.procManager.IsRunning("idle_miner") {
+	if s.idleMinerPid > 0 && s.isDetachedAlive(s.idleMinerPid) {
 		return nil
 	}
+
 	args := strings.Fields(idle.Args)
-	_, err := s.procManager.Start(ctx, "idle_miner", idle.Command, args)
+	detached, err := s.startDetached(idle.Command, args)
 	if err != nil {
-		return fmt.Errorf("start idle miner: %w", err)
+		return fmt.Errorf("start idle miner detached: %w", err)
 	}
+	s.idleMinerPid = detached.Pid
+	s.logger.Info("idle miner started (detached)", "pid", detached.Pid, "command", idle.Command)
 	return nil
 }
 
 func (s *Scheduler) stopIdleMiner(ctx context.Context) error {
-	grace := time.Duration(s.cfg.IdleBehavior.GracePeriodSec) * time.Second
-	if grace <= 0 {
-		grace = 3 * time.Second
+	_ = ctx
+	if s.idleMinerPid <= 0 {
+		return nil
 	}
-	return s.procManager.Stop(ctx, "idle_miner", grace)
+
+	graceSec := s.cfg.IdleBehavior.GracePeriodSec
+	if graceSec <= 0 {
+		graceSec = 3
+	}
+
+	err := s.stopDetached(s.idleMinerPid, graceSec)
+	if err != nil {
+		return fmt.Errorf("stop idle miner detached pid %d: %w", s.idleMinerPid, err)
+	}
+
+	s.logger.Info("idle miner stopped (detached)", "pid", s.idleMinerPid)
+	s.idleMinerPid = 0
+	return nil
 }

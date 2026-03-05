@@ -22,6 +22,53 @@ type mockProcessManager struct {
 	stops   map[string]int
 }
 
+type mockDetachedController struct {
+	mu        sync.Mutex
+	running   bool
+	currentID int
+	starts    int
+	stops     int
+}
+
+func newMockDetachedController() *mockDetachedController {
+	return &mockDetachedController{}
+}
+
+func (m *mockDetachedController) start(_ string, _ []string) (*process.DetachedProcess, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.starts++
+	m.currentID++
+	m.running = true
+	return &process.DetachedProcess{Pid: m.currentID}, nil
+}
+
+func (m *mockDetachedController) stop(_ int, _ int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stops++
+	m.running = false
+	return nil
+}
+
+func (m *mockDetachedController) alive(pid int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.running && pid == m.currentID
+}
+
+func (m *mockDetachedController) startCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.starts
+}
+
+func (m *mockDetachedController) stopCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stops
+}
+
 func newMockProcessManager() *mockProcessManager {
 	return &mockProcessManager{running: map[string]bool{}, starts: map[string]int{}, stops: map[string]int{}}
 }
@@ -152,9 +199,10 @@ func (m *mockOTAUpdater) callCount() int {
 	return m.called
 }
 
-func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient) {
+func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient, *mockDetachedController) {
 	proc := newMockProcessManager()
 	pcl := &mockPoolClient{}
+	detached := newMockDetachedController()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	s := New(&config.Config{
@@ -179,7 +227,10 @@ func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient) {
 	s.hashcatRunner = &mockHashcatRunner{}
 	s.containerRunner = &mockContainerRunner{}
 	s.updater = &mockOTAUpdater{}
-	return s, proc, pcl
+	s.startDetached = detached.start
+	s.stopDetached = detached.stop
+	s.isDetachedAlive = detached.alive
+	return s, proc, pcl, detached
 }
 
 func waitFor(t *testing.T, fn func() bool) {
@@ -195,52 +246,52 @@ func waitFor(t *testing.T, fn func() bool) {
 }
 
 func TestSchedulerStartsInStandby(t *testing.T) {
-	s, proc, _ := newTestScheduler()
+	s, _, _, detached := newTestScheduler()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() { _ = s.Run(ctx) }()
 
-	waitFor(t, func() bool { return proc.startCount("idle_miner") >= 1 })
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
 	if s.CurrentState() != StateStandby {
 		t.Fatalf("expected standby, got %s", s.CurrentState())
 	}
 }
 
 func TestSchedulerTransitionToWPAAudit(t *testing.T) {
-	s, proc, pcl := newTestScheduler()
+	s, _, pcl, detached := newTestScheduler()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() { _ = s.Run(ctx) }()
-	waitFor(t, func() bool { return proc.startCount("idle_miner") >= 1 })
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
 
 	pcl.emit(pool.JobGPUMessage{Type: "job_gpu", JobID: "job1", HashMode: 22000, Target: "hash", Skip: 0, Limit: 1})
-	waitFor(t, func() bool { return proc.stopCount("idle_miner") >= 1 })
+	waitFor(t, func() bool { return detached.stopCount() >= 1 })
 }
 
 func TestSchedulerTransitionToAIContainer(t *testing.T) {
-	s, proc, pcl := newTestScheduler()
+	s, _, pcl, detached := newTestScheduler()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() { _ = s.Run(ctx) }()
-	waitFor(t, func() bool { return proc.startCount("idle_miner") >= 1 })
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
 
 	pcl.emit(pool.JobContainerMessage{Type: "job_container", JobID: "job2", Image: "img", TargetPort: 8080})
-	waitFor(t, func() bool { return proc.stopCount("idle_miner") >= 1 })
+	waitFor(t, func() bool { return detached.stopCount() >= 1 })
 }
 
 func TestSchedulerReturnsToStandbyAfterJob(t *testing.T) {
-	s, proc, pcl := newTestScheduler()
+	s, _, pcl, detached := newTestScheduler()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() { _ = s.Run(ctx) }()
-	waitFor(t, func() bool { return proc.startCount("idle_miner") >= 1 })
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
 
 	pcl.emit(pool.JobGPUMessage{Type: "job_gpu", JobID: "job3", HashMode: 22000, Target: "hash", Skip: 0, Limit: 1})
-	waitFor(t, func() bool { return proc.startCount("idle_miner") >= 2 })
+	waitFor(t, func() bool { return detached.startCount() >= 2 })
 
 	if s.CurrentState() != StateStandby {
 		t.Fatalf("expected standby after job, got %s", s.CurrentState())
@@ -248,12 +299,12 @@ func TestSchedulerReturnsToStandbyAfterJob(t *testing.T) {
 }
 
 func TestSchedulerHandlesPoolStatus(t *testing.T) {
-	s, proc, pcl := newTestScheduler()
+	s, _, pcl, detached := newTestScheduler()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() { _ = s.Run(ctx) }()
-	waitFor(t, func() bool { return proc.startCount("idle_miner") >= 1 })
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
 
 	pcl.emit(pool.PoolStatusMessage{Type: "pool_status", Status: pool.PoolStatusAwaitingGenesis})
 	waitFor(t, func() bool { return s.CurrentPoolStatus() == pool.PoolStatusAwaitingGenesis })
@@ -272,7 +323,7 @@ func TestSchedulerHandlesPoolStatus(t *testing.T) {
 }
 
 func TestSchedulerLoginCarriesVersionAndOS(t *testing.T) {
-	s, _, pcl := newTestScheduler()
+	s, _, pcl, _ := newTestScheduler()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -292,7 +343,7 @@ func TestSchedulerLoginCarriesVersionAndOS(t *testing.T) {
 }
 
 func TestSchedulerHandlesOTAUpdateRequired(t *testing.T) {
-	s, proc, pcl := newTestScheduler()
+	s, _, pcl, detached := newTestScheduler()
 	mockUpdater, ok := s.updater.(*mockOTAUpdater)
 	if !ok {
 		t.Fatalf("expected mock ota updater")
@@ -302,7 +353,7 @@ func TestSchedulerHandlesOTAUpdateRequired(t *testing.T) {
 	defer cancel()
 
 	go func() { _ = s.Run(ctx) }()
-	waitFor(t, func() bool { return proc.startCount("idle_miner") >= 1 })
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
 
 	pcl.emit(pool.OTAUpdateMessage{
 		Type:          "update_required",

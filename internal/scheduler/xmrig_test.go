@@ -70,7 +70,7 @@ func (m *mockXMRigManager) snapshot() (start, full, heartbeat, stop int) {
 func TestXMRigStartsOnSchedulerRun(t *testing.T) {
 	t.Parallel()
 
-	s, _, _ := newTestScheduler()
+	s, _, _, _ := newTestScheduler()
 	mgr := &mockXMRigManager{}
 	s.xmrigManager = mgr
 
@@ -87,7 +87,7 @@ func TestXMRigStartsOnSchedulerRun(t *testing.T) {
 func TestXMRigSwitchesToHeartbeatOnGPUJob(t *testing.T) {
 	t.Parallel()
 
-	s, _, pcl := newTestScheduler()
+	s, _, pcl, _ := newTestScheduler()
 	mgr := &mockXMRigManager{}
 	s.xmrigManager = mgr
 
@@ -107,7 +107,7 @@ func TestXMRigSwitchesToHeartbeatOnGPUJob(t *testing.T) {
 func TestXMRigRestoresFullModeAfterJob(t *testing.T) {
 	t.Parallel()
 
-	s, _, pcl := newTestScheduler()
+	s, _, pcl, _ := newTestScheduler()
 	mgr := &mockXMRigManager{}
 	s.xmrigManager = mgr
 
@@ -127,7 +127,7 @@ func TestXMRigRestoresFullModeAfterJob(t *testing.T) {
 func TestXMRigNeverFullyStoppedDuringTransitions(t *testing.T) {
 	t.Parallel()
 
-	s, _, pcl := newTestScheduler()
+	s, _, pcl, _ := newTestScheduler()
 	mgr := &mockXMRigManager{}
 	s.xmrigManager = mgr
 
