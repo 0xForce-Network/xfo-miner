@@ -2,7 +2,9 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -14,6 +16,7 @@ import (
 // Config maps specs §4 config.json.
 type Config struct {
 	NodeID        string           `json:"node_id"`
+	WalletAddress string           `json:"wallet_address"`
 	WorkerName    string           `json:"worker_name"`
 	PoolURL       string           `json:"pool_url"`
 	MaxCPUThreads int              `json:"max_cpu_threads"`
@@ -43,8 +46,29 @@ type IdleBehavior struct {
 type CPUMiningConfig struct {
 	Enabled           bool   `json:"enabled"`
 	XMRigPath         string `json:"xmrig_path"`
+	StratumURL        string `json:"stratum_url"`
 	MaxThreads        int    `json:"max_threads"`
 	BackgroundThreads int    `json:"background_threads"`
+}
+
+func (c *Config) L2Enabled() bool {
+	return strings.TrimSpace(c.PoolURL) != ""
+}
+
+func generateNodeID(walletAddress, workerName string) string {
+	seed := strings.TrimSpace(walletAddress) + "|" + strings.TrimSpace(workerName)
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+func isValidXfoAddress(addr string) bool {
+	if len(addr) < 95 || len(addr) > 106 {
+		return false
+	}
+	if !strings.HasPrefix(addr, "XFo") && !strings.HasPrefix(addr, "XFs") {
+		return false
+	}
+	return true
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -71,6 +95,10 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() error {
+	if strings.TrimSpace(c.NodeID) == "" {
+		c.NodeID = generateNodeID(c.WalletAddress, c.WorkerName)
+	}
+
 	if c.MaxCPUThreads == 0 {
 		cpu := runtime.NumCPU() / 2
 		if cpu < 1 {
@@ -95,18 +123,25 @@ func (c *Config) applyDefaults() error {
 func (c *Config) Validate() error {
 	var validationErrs []error
 
-	if strings.TrimSpace(c.NodeID) == "" {
-		validationErrs = append(validationErrs, errors.New("node_id is required"))
-	}
 	if strings.TrimSpace(c.WorkerName) == "" {
 		validationErrs = append(validationErrs, errors.New("worker_name is required"))
 	}
+	if c.CPUMining.Enabled {
+		walletAddress := strings.TrimSpace(c.WalletAddress)
+		if walletAddress == "" {
+			validationErrs = append(validationErrs, errors.New("wallet_address is required when cpu_mining.enabled is true"))
+		} else if !isValidXfoAddress(walletAddress) {
+			validationErrs = append(validationErrs, errors.New("wallet_address must be a valid XFo/XFs address (95-106 chars, base58)"))
+		}
+	}
 
-	pool, err := url.Parse(c.PoolURL)
-	if err != nil {
-		validationErrs = append(validationErrs, fmt.Errorf("pool_url invalid: %w", err))
-	} else if pool.Scheme != "wss" || pool.Host == "" {
-		validationErrs = append(validationErrs, errors.New("pool_url must be a valid wss:// URL"))
+	if c.L2Enabled() {
+		pool, err := url.Parse(c.PoolURL)
+		if err != nil {
+			validationErrs = append(validationErrs, fmt.Errorf("pool_url invalid: %w", err))
+		} else if (pool.Scheme != "wss" && pool.Scheme != "ws") || pool.Host == "" {
+			validationErrs = append(validationErrs, errors.New("pool_url must be a valid wss:// or ws:// URL"))
+		}
 	}
 
 	if c.MaxCPUThreads < 1 {
@@ -126,6 +161,9 @@ func (c *Config) Validate() error {
 	if c.CPUMining.Enabled {
 		if strings.TrimSpace(c.CPUMining.XMRigPath) == "" {
 			validationErrs = append(validationErrs, errors.New("cpu_mining.xmrig_path is required when cpu_mining.enabled is true"))
+		}
+		if strings.TrimSpace(c.CPUMining.StratumURL) == "" {
+			validationErrs = append(validationErrs, errors.New("cpu_mining.stratum_url is required when cpu_mining.enabled is true (e.g. stratum+tcp://host:3333)"))
 		}
 		if c.CPUMining.BackgroundThreads < 1 {
 			validationErrs = append(validationErrs, errors.New("cpu_mining.background_threads must be >= 1"))

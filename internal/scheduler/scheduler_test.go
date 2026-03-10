@@ -113,13 +113,30 @@ type mockPoolClient struct {
 	handler   func(string, json.RawMessage)
 	connected bool
 	lastLogin *pool.LoginMessage
+	connectErr error
+	loginErr   error
+	connects   int
+	logins     int
 }
 
-func (m *mockPoolClient) Connect(_ context.Context, _ string) error { m.connected = true; return nil }
+func (m *mockPoolClient) Connect(_ context.Context, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.connects++
+	if m.connectErr != nil {
+		return m.connectErr
+	}
+	m.connected = true
+	return nil
+}
 func (m *mockPoolClient) Close() error                              { return nil }
 func (m *mockPoolClient) SendLogin(login *pool.LoginMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.logins++
+	if m.loginErr != nil {
+		return m.loginErr
+	}
 	if login == nil {
 		m.lastLogin = nil
 		return nil
@@ -161,6 +178,18 @@ func (m *mockPoolClient) getLastLogin() *pool.LoginMessage {
 	}
 	copy := *m.lastLogin
 	return &copy
+}
+
+func (m *mockPoolClient) connectCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.connects
+}
+
+func (m *mockPoolClient) loginCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.logins
 }
 
 type mockHashcatRunner struct{}
@@ -363,4 +392,58 @@ func TestSchedulerHandlesOTAUpdateRequired(t *testing.T) {
 	})
 
 	waitFor(t, func() bool { return mockUpdater.callCount() >= 1 })
+}
+
+func TestSchedulerRunConnectFailDoesNotExitFatal(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	pcl.connectErr = context.DeadlineExceeded
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(ctx) }()
+
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+	if got := pcl.connectCount(); got != 1 {
+		t.Fatalf("expected connect count 1, got %d", got)
+	}
+	if got := pcl.loginCount(); got != 0 {
+		t.Fatalf("expected login count 0 when connect fails, got %d", got)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() returned error on connect failure degrade path: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not exit after context cancel")
+	}
+}
+
+func TestSchedulerRunLoginFailDoesNotExitFatal(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	pcl.loginErr = context.Canceled
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(ctx) }()
+
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+	if got := pcl.connectCount(); got != 1 {
+		t.Fatalf("expected connect count 1, got %d", got)
+	}
+	if got := pcl.loginCount(); got != 1 {
+		t.Fatalf("expected login count 1, got %d", got)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() returned error on login failure degrade path: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not exit after context cancel")
+	}
 }

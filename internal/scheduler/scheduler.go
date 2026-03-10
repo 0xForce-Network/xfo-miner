@@ -94,7 +94,7 @@ func New(cfg *config.Config, version string, capabilities *env.SystemCapabilitie
 		s.updater = up
 	}
 	if cfg.CPUMining.Enabled {
-		s.xmrigManager = NewXMRigManager(procManager, &cfg.CPUMining, cfg.PoolURL, cfg.NodeID, cfg.WorkerName, logger)
+		s.xmrigManager = NewXMRigManager(procManager, &cfg.CPUMining, cfg.CPUMining.StratumURL, cfg.WalletAddress, cfg.NodeID, cfg.WorkerName, logger)
 	} else {
 		s.xmrigManager = NewNoopXMRigManager()
 	}
@@ -112,10 +112,6 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			s.logger.Warn("dropping pool message due to full queue", "type", msgType)
 		}
 	})
-
-	if err := s.poolClient.Connect(ctx, s.cfg.PoolURL); err != nil {
-		return fmt.Errorf("connect pool: %w", err)
-	}
 
 	login := &pool.LoginMessage{
 		Type:       "login",
@@ -136,8 +132,12 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			RunMode:        s.capabilities.RunMode,
 		},
 	}
-	if err := s.poolClient.SendLogin(login); err != nil {
-		return fmt.Errorf("send login: %w", err)
+	if s.cfg.L2Enabled() {
+		if err := s.poolClient.Connect(ctx, s.cfg.PoolURL); err != nil {
+			s.logger.Warn("L2 pool WebSocket connect failed — degrading to L1-only mode", "pool_url", s.cfg.PoolURL, "error", err)
+		} else if err := s.poolClient.SendLogin(login); err != nil {
+			s.logger.Warn("L2 pool login failed — degrading to L1-only mode", "error", err)
+		}
 	}
 
 	if err := s.xmrigManager.Start(ctx); err != nil {

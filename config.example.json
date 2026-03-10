@@ -1,7 +1,8 @@
 {
-  "node_id": "XFo2A88...9abc",
+  "node_id": "",
+  "wallet_address": "XFo...<YOUR_WALLET_ADDRESS>",
   "worker_name": "Rig-4090-Alpha",
-  "pool_url": "wss://pool.xfo.network/api/v1/stream",
+  "pool_url": "",
   "max_cpu_threads": 4,
   "multisig": {
     "enabled": false,
@@ -14,6 +15,7 @@
   "cpu_mining": {
     "enabled": true,
     "xmrig_path": "./bin/xmrig",
+    "stratum_url": "stratum+tcp://<POOL_HOST>:3333",
     "max_threads": 12,
     "background_threads": 1
   },
@@ -21,6 +23,6 @@
     "enabled": true,
     "grace_period_sec": 5,
     "command": "./bin/t-rex",
-    "args": "-a kawpow -o stratum+tcp://rvn.pool.com:1234 -u WALLET -p x"
+    "args": "-a kawpow -o stratum+tcp://<IDLE_POOL_HOST>:<PORT> -u <WALLET> -p x"
   }
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -19,22 +21,37 @@ type Manager interface {
 	IsRunning(name string) bool
 }
 
+type ManagerOption func(*RealManager)
+
+func WithLogDir(dir string) ManagerOption {
+	return func(m *RealManager) {
+		m.logDir = dir
+	}
+}
+
 type RealManager struct {
 	mu               sync.RWMutex
 	procs            map[string]*ManagedProcess
 	logger           *slog.Logger
 	defaultGraceTime time.Duration
+	logDir           string
 }
 
-func NewRealManager(logger *slog.Logger) *RealManager {
+func NewRealManager(logger *slog.Logger, opts ...ManagerOption) *RealManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &RealManager{
+	m := &RealManager{
 		procs:            make(map[string]*ManagedProcess),
 		logger:           logger,
 		defaultGraceTime: 3 * time.Second,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(m)
+		}
+	}
+	return m
 }
 
 func (m *RealManager) Start(ctx context.Context, name string, command string, args []string) (*ManagedProcess, error) {
@@ -56,6 +73,12 @@ func (m *RealManager) Start(ctx context.Context, name string, command string, ar
 	}
 
 	m.logger.Info("process started", "name", name, "command", command)
+	if m.logDir != "" {
+		go m.pipeToFile(proc, name)
+	} else {
+		go m.pipeToLogger(proc, name)
+	}
+
 	go func(procName string, done <-chan struct{}) {
 		<-done
 		m.remove(procName)
@@ -142,6 +165,74 @@ func (m *RealManager) remove(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.procs, name)
+}
+
+func (m *RealManager) pipeToFile(proc *ManagedProcess, name string) {
+	if err := os.MkdirAll(m.logDir, 0o755); err != nil {
+		m.logger.Error("failed to create subprocess log directory", "dir", m.logDir, "error", err)
+		m.pipeToLogger(proc, name)
+		return
+	}
+
+	logPath := filepath.Join(m.logDir, name+".log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		m.logger.Error("failed to open subprocess log file", "name", name, "path", logPath, "error", err)
+		m.pipeToLogger(proc, name)
+		return
+	}
+	defer f.Close()
+
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex
+	)
+	writeLine := func(prefix, line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = fmt.Fprintf(f, "%s %s\n", prefix, line)
+	}
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := ScanLines(proc.Stdout, func(line string) {
+			writeLine("[stdout]", line)
+		}); err != nil {
+			m.logger.Warn("failed reading subprocess stdout", "name", name, "error", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := ScanLines(proc.Stderr, func(line string) {
+			writeLine("[stderr]", line)
+		}); err != nil {
+			m.logger.Warn("failed reading subprocess stderr", "name", name, "error", err)
+		}
+	}()
+	wg.Wait()
+}
+
+func (m *RealManager) pipeToLogger(proc *ManagedProcess, name string) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := ScanLines(proc.Stdout, func(line string) {
+			m.logger.Info("subprocess output", "name", name, "stream", "stdout", "line", line)
+		}); err != nil {
+			m.logger.Warn("failed reading subprocess stdout", "name", name, "error", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := ScanLines(proc.Stderr, func(line string) {
+			m.logger.Warn("subprocess output", "name", name, "stream", "stderr", "line", line)
+		}); err != nil {
+			m.logger.Warn("failed reading subprocess stderr", "name", name, "error", err)
+		}
+	}()
+	wg.Wait()
 }
 
 type NoopManager struct{}

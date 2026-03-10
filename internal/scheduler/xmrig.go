@@ -33,7 +33,8 @@ type XMRigManager struct {
 	procManager process.Manager
 	cfg         *config.CPUMiningConfig
 	logger      *slog.Logger
-	poolURL     string
+	stratumURL  string
+	walletAddress string
 	nodeID      string
 	workerName  string
 
@@ -49,7 +50,7 @@ type XMRigManager struct {
 	stopCh      chan struct{}
 }
 
-func NewXMRigManager(procManager process.Manager, cfg *config.CPUMiningConfig, poolURL string, nodeID string, workerName string, logger *slog.Logger) *XMRigManager {
+func NewXMRigManager(procManager process.Manager, cfg *config.CPUMiningConfig, stratumURL string, walletAddress string, nodeID string, workerName string, logger *slog.Logger) *XMRigManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -58,7 +59,8 @@ func NewXMRigManager(procManager process.Manager, cfg *config.CPUMiningConfig, p
 		procManager:            procManager,
 		cfg:                    cfg,
 		logger:                 logger,
-		poolURL:                poolURL,
+		stratumURL:             stratumURL,
+		walletAddress:          walletAddress,
 		nodeID:                 nodeID,
 		workerName:             workerName,
 		httpPort:               port,
@@ -157,10 +159,14 @@ func (m *XMRigManager) restartWithModeLocked(ctx context.Context, mode string, t
 	args := []string{
 		"--http-port", strconv.Itoa(m.httpPort),
 		"--threads", strconv.Itoa(threads),
-		"-o", m.poolURL,
-		"-u", m.nodeID + "." + m.workerName,
+		"-o", m.stratumURL,
+		"-u", m.walletAddress + "." + m.workerName,
+		"-a", "rx/0",
+		"-p", "x",
 		"--no-color",
+		"--user-agent", fmt.Sprintf("XMRig/6.19.3 (xfo-miner) threads:%d", threads),
 	}
+	m.logger.Info("xmrig starting", "path", m.cfg.XMRigPath, "args", args)
 
 	proc, err := m.procManager.Start(ctx, xmrigProcessName, m.cfg.XMRigPath, args)
 	if err != nil {

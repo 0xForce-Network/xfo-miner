@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +62,14 @@ func WithReconnect(base, max time.Duration) ClientOption {
 	return func(c *WSSClient) {
 		c.reconnectBase = base
 		c.reconnectMax = max
+	}
+}
+
+// WithInsecureSkipVerify disables TLS certificate verification.
+// Use ONLY for local testnet with self-signed certificates.
+func WithInsecureSkipVerify() ClientOption {
+	return func(c *WSSClient) {
+		c.dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // testnet only
 	}
 }
 

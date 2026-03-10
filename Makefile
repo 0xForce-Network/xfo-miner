@@ -1,6 +1,7 @@
 APP_NAME := xfo-miner
 CMD_PATH := ./cmd/xfo-miner
 OUT_DIR := ./bin
+BUILD_BIN := $(OUT_DIR)/$(APP_NAME)
 XMRIG_DIR ?= ./bin/xmrig
 XMRIG_LINUX := $(XMRIG_DIR)/xmrig-linux-amd64
 XMRIG_WINDOWS := $(XMRIG_DIR)/xmrig-windows-amd64.exe
@@ -10,7 +11,7 @@ XMRIG_DARWIN := $(XMRIG_DIR)/xmrig-darwin-arm64
 
 build:
 	mkdir -p $(OUT_DIR)
-	GOOS=linux GOARCH=amd64 go build -o $(OUT_DIR)/$(APP_NAME)-linux-amd64 $(CMD_PATH)
+	GOOS=linux GOARCH=amd64 go build -o $(BUILD_BIN) $(CMD_PATH)
 
 build-all:
 	mkdir -p $(OUT_DIR)

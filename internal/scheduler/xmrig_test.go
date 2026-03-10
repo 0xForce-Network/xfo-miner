@@ -16,6 +16,8 @@ import (
 	"github.com/0xforce/xfo-miner/internal/process"
 )
 
+const testWalletAddress = "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3"
+
 func waitForPoolHandler(t *testing.T, pcl *mockPoolClient) {
 	t.Helper()
 	waitFor(t, func() bool {
@@ -174,7 +176,7 @@ func TestXMRigManagerUsesHTTPAPIForThreadSwitch(t *testing.T) {
 		XMRigPath:         "xmrig",
 		MaxThreads:        4,
 		BackgroundThreads: 1,
-	}, "wss://pool.example/ws", "node-1", "worker-1", logger)
+	}, "stratum+tcp://pool.example:3333", testWalletAddress, "node-1", "worker-1", logger)
 	mgr.apiBaseURL = api.URL
 	mgr.httpClient = api.Client()
 
@@ -236,7 +238,7 @@ func TestXMRigManagerWatchdogRetriesRestart(t *testing.T) {
 		XMRigPath:         "xmrig",
 		MaxThreads:        4,
 		BackgroundThreads: 1,
-	}, "wss://pool.example/ws", "node-1", "worker-1", logger)
+	}, "stratum+tcp://pool.example:3333", testWalletAddress, "node-1", "worker-1", logger)
 	mgr.currentMode = xmrigModeFull
 	mgr.watchdogInitialBackoff = 10 * time.Millisecond
 	mgr.watchdogMaxBackoff = 20 * time.Millisecond
@@ -291,7 +293,7 @@ func TestXMRigManagerInjectsPoolAndWorkerArgs(t *testing.T) {
 		XMRigPath:         "xmrig",
 		MaxThreads:        4,
 		BackgroundThreads: 1,
-	}, "wss://pool.xfo.network/api/v1/stream", "XFo2A88ABC", "Rig-4090-Alpha", logger)
+	}, "stratum+tcp://pool.example.com:3333", testWalletAddress, "XFo2A88ABC", "Rig-4090-Alpha", logger)
 
 	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -311,6 +313,6 @@ func TestXMRigManagerInjectsPoolAndWorkerArgs(t *testing.T) {
 		t.Fatalf("missing arg pair %s %s in args=%v", key, wantVal, args)
 	}
 
-	requirePair("-o", "wss://pool.xfo.network/api/v1/stream")
-	requirePair("-u", "XFo2A88ABC.Rig-4090-Alpha")
+	requirePair("-o", "stratum+tcp://pool.example.com:3333")
+	requirePair("-u", testWalletAddress+".Rig-4090-Alpha")
 }

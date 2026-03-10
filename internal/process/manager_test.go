@@ -4,6 +4,9 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -111,5 +114,37 @@ func TestStopAll(t *testing.T) {
 	}
 	if mgr.IsRunning("p1") || mgr.IsRunning("p2") {
 		t.Fatalf("all managed processes should be stopped")
+	}
+}
+
+func TestRealManagerCapturesSubprocessOutput(t *testing.T) {
+	t.Parallel()
+
+	logDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewRealManager(logger, WithLogDir(logDir))
+
+	proc, err := mgr.Start(context.Background(), "echoer", "sh", []string{"-c", "echo hello"})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := proc.Wait(); err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+
+	logPath := filepath.Join(logDir, "echoer.log")
+	var content []byte
+	for i := 0; i < 20; i++ {
+		content, err = os.ReadFile(logPath)
+		if err == nil && strings.Contains(string(content), "[stdout] hello") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+	if !strings.Contains(string(content), "[stdout] hello") {
+		t.Fatalf("expected log to contain stdout line, got %q", string(content))
 	}
 }

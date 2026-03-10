@@ -25,7 +25,17 @@ const version = "0.1.0"
 
 func main() {
 	configPath := flag.String("config", "./config.json", "path to config.json")
+	insecure := flag.Bool("insecure", false, "skip TLS certificate verification (testnet only)")
+	logDir := flag.String("log-dir", "", "directory to write subprocess log files (xmrig, idle miner, etc.)")
+	showVersion := flag.Bool("version", false, "print version and exit")
+
+	flag.Usage = func() { printHelp() }
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("xfo-miner v%s\n", version)
+		os.Exit(0)
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	printBanner(logger)
@@ -86,7 +96,23 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	poolClient := pool.NewWSSClient(logger)
+	var poolOpts []pool.ClientOption
+	if *insecure {
+		logger.Warn("TLS certificate verification disabled (--insecure flag)")
+		poolOpts = append(poolOpts, pool.WithInsecureSkipVerify())
+	}
+	var poolClient pool.Client
+	if cfg.L2Enabled() {
+		poolClient = pool.NewWSSClient(logger, poolOpts...)
+		reporter := telemetry.NewReporter(cfg.NodeID, 30*time.Second, poolClient, logger)
+		go reporter.RunL1Loop(ctx)
+		go reporter.RunL2Loop(ctx)
+		logger.Info("L2 pool WebSocket enabled", "pool_url", cfg.PoolURL)
+	} else {
+		poolClient = pool.NewNoopClient()
+		logger.Warn("L2 pool WebSocket DISABLED — running in L1-only mode (no telemetry, no GPU tasks)")
+	}
+
 	if cfg.Multisig.Enabled {
 		_ = multisig.NewStakingManager(multisig.StakingConfig{
 			WalletRPCURL: cfg.Multisig.WalletRPCURL,
@@ -94,11 +120,8 @@ func main() {
 		}, logger)
 		logger.Info("multisig staking manager initialized", "wallet_rpc", cfg.Multisig.WalletRPCURL, "oracle_api", cfg.Multisig.OracleAPIURL)
 	}
-	reporter := telemetry.NewReporter(cfg.NodeID, 30*time.Second, poolClient, logger)
-	go reporter.RunL1Loop(ctx)
-	go reporter.RunL2Loop(ctx)
 
-	s := scheduler.New(cfg, version, capabilities, process.NewRealManager(logger), poolClient, logger)
+	s := scheduler.New(cfg, version, capabilities, process.NewRealManager(logger, process.WithLogDir(*logDir)), poolClient, logger)
 	if err := s.Run(ctx); err != nil {
 		logger.Error("scheduler exited with error", "error", err)
 		os.Exit(1)
@@ -109,4 +132,56 @@ func main() {
 
 func printBanner(logger *slog.Logger) {
 	logger.Info(fmt.Sprintf("xfo-miner v%s", version))
+}
+
+func printHelp() {
+	help := `xfo-miner v` + version + ` — 0xForce Network Mining Client
+
+USAGE:
+  xfo-miner [flags]
+
+CLI FLAGS:
+  --config <path>      Path to config.json (default: ./config.json)
+  --insecure           Skip TLS certificate verification (testnet only)
+  --log-dir <path>     Directory to write subprocess log files (xmrig, idle miner, etc.)
+  --version            Print version and exit
+  --help               Show this help message
+
+CONFIG FILE PARAMETERS (config.json):
+
+  Top-level:
+    node_id              (string)  Unique miner node identifier (optional; auto-generated if empty)
+    worker_name          (string)  Human-readable worker/rig name (required)
+    pool_url             (string)  Pool WebSocket endpoint, wss:// or ws:// (optional; leave empty for L1-only mode)
+    max_cpu_threads      (int)     Max CPU threads for task execution (default: half of system CPUs)
+
+  multisig:
+    enabled              (bool)    Enable multisig staking integration (default: false)
+    wallet_rpc_url       (string)  Monero wallet RPC URL for multisig operations
+    oracle_api_url       (string)  Oracle bridge API URL for staking verification
+
+  auto_update:
+    enabled              (bool)    Enable OTA auto-update (default: false)
+
+  cpu_mining:
+    enabled              (bool)    Enable CPU mining via xmrig (default: false)
+    xmrig_path           (string)  Path to xmrig binary (required when enabled)
+    stratum_url          (string)  Stratum pool URL, e.g. stratum+tcp://host:3333 (required when enabled)
+    max_threads          (int)     Max threads for active mining (default: max_cpu_threads)
+    background_threads   (int)     Threads used during background/idle mining (default: 1)
+
+  idle_behavior:
+    enabled              (bool)    Enable idle-mode fallback mining (default: false)
+    grace_period_sec     (int)     Seconds to wait before entering idle mode (default: 0)
+    command              (string)  Idle miner binary path (required when enabled)
+    args                 (string)  Arguments passed to idle miner command
+
+EXAMPLES:
+  xfo-miner --config /etc/xfo/config.json
+  xfo-miner --config ./config.json --insecure --log-dir /var/log/xfo
+  xfo-miner --version
+
+See config.example.json for a full configuration template.
+`
+	fmt.Print(help)
 }
