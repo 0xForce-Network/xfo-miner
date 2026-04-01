@@ -4,9 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-    paths:
-      - 'xfo-miner/**'
-      - 'xfo-miner/.github/workflows/miner-release.yml'
   release:
     types: [published]
   workflow_dispatch:
@@ -26,9 +23,6 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: xfo-miner
 
     env:
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -203,5 +197,5 @@ jobs:
         with:
           name: xfo-miner-release-${{ steps.meta.outputs.release_tag }}
           path: |
-            xfo-miner/dist/packages/*
-            xfo-miner/dist/latest.json
+            dist/packages/*
+            dist/latest.json

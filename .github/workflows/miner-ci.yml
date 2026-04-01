@@ -4,13 +4,11 @@ on:
   push:
     branches: [main, develop]
     paths:
-      - 'xfo-miner/**'
-      - 'xfo-miner/.github/workflows/miner-ci.yml'
+      - '**'
   pull_request:
     branches: [main]
     paths:
-      - 'xfo-miner/**'
-      - 'xfo-miner/.github/workflows/miner-ci.yml'
+      - '**'
   workflow_dispatch:
 
 jobs:
@@ -35,10 +33,6 @@ jobs:
           - goos: darwin
             goarch: arm64
             ext: ""
-
-    defaults:
-      run:
-        working-directory: xfo-miner
 
     steps:
       - name: Checkout
@@ -65,4 +59,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: xfo-miner-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: xfo-miner/dist/*
+          path: dist/*
