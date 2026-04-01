@@ -1,0 +1,207 @@
+name: miner-release
+
+on:
+  push:
+    tags:
+      - 'v*'
+    paths:
+      - 'xfo-miner/**'
+      - 'xfo-miner/.github/workflows/miner-release.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.1.0 or v1.1.0). Empty means infer from tag.'
+        required: false
+      min_version:
+        description: 'Minimum supported version for forced OTA upgrade (e.g. 1.0.0)'
+        required: true
+        default: '0.1.0'
+      release_notes:
+        description: 'Release notes shown in latest.json'
+        required: false
+        default: 'Automated miner release'
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: xfo-miner
+
+    env:
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Setup Node (for JSON generation)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INPUT_VERSION="${{ github.event.inputs.version }}"
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            RAW_VERSION="${INPUT_VERSION}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            RAW_VERSION="${GITHUB_REF_NAME}"
+          else
+            echo "workflow_dispatch without version input and no tag ref; cannot infer version" >&2
+            exit 1
+          fi
+
+          VERSION="${RAW_VERSION#v}"
+          RELEASE_TAG="v${VERSION}"
+          PREFIX="releases/${RELEASE_TAG}"
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "prefix=${PREFIX}" >> "$GITHUB_OUTPUT"
+          echo "endpoint=${ENDPOINT}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/packages
+
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          build_one() {
+            local GOOS="$1"
+            local GOARCH="$2"
+            local PLATFORM_KEY="${GOOS}-${GOARCH}"
+            local BIN_NAME="xfo-miner"
+            local RAW_BIN="dist/${BIN_NAME}-${PLATFORM_KEY}"
+
+            if [[ "${GOOS}" == "windows" ]]; then
+              RAW_BIN+=".exe"
+            fi
+
+            CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" \
+              go build -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "${RAW_BIN}" \
+              ./cmd/xfo-miner
+
+            if [[ "${GOOS}" == "windows" ]]; then
+              local ARCHIVE="xfo-miner-${PLATFORM_KEY}.zip"
+              (cd dist && zip -q -j "packages/${ARCHIVE}" "$(basename "${RAW_BIN}")")
+            else
+              local ARCHIVE="xfo-miner-${PLATFORM_KEY}.tar.gz"
+              (cd dist && tar -czf "packages/${ARCHIVE}" "$(basename "${RAW_BIN}")")
+            fi
+          }
+
+          build_one linux amd64
+          build_one linux arm64
+          build_one windows amd64
+          build_one darwin amd64
+          build_one darwin arm64
+
+      - name: Generate latest.json manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          PREFIX="${{ steps.meta.outputs.prefix }}"
+          RELEASE_NOTES="${{ github.event.inputs.release_notes }}"
+          MIN_VERSION="${{ github.event.inputs.min_version }}"
+
+          if [[ -z "${RELEASE_NOTES}" ]]; then
+            RELEASE_NOTES="Automated miner release"
+          fi
+
+          node <<'NODE'
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const path = require('path');
+
+          const version = process.env.VERSION;
+          const minVersion = process.env.MIN_VERSION;
+          const releaseNotes = process.env.RELEASE_NOTES;
+          const prefix = process.env.PREFIX;
+
+          const packagesDir = path.join('dist', 'packages');
+          const files = fs.readdirSync(packagesDir).sort();
+          const assets = {};
+
+          for (const file of files) {
+            const fullPath = path.join(packagesDir, file);
+            const buf = fs.readFileSync(fullPath);
+            const checksum = crypto.createHash('sha256').update(buf).digest('hex');
+
+            const m = file.match(/^xfo-miner-([a-z]+-[a-z0-9_]+)\.(tar\.gz|zip)$/i);
+            if (!m) continue;
+            const platformKey = m[1];
+
+            assets[platformKey] = {
+              download_url: `https://update.xfo.network/${prefix}/${file}`,
+              checksum,
+              filename: file,
+            };
+          }
+
+          const manifest = {
+            latest_version: version,
+            min_version: minVersion,
+            release_notes: releaseNotes,
+            assets,
+          };
+
+          fs.writeFileSync(path.join('dist', 'latest.json'), JSON.stringify(manifest, null, 2) + '\n');
+          NODE
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          MIN_VERSION: ${{ github.event.inputs.min_version }}
+          RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
+          PREFIX: ${{ steps.meta.outputs.prefix }}
+
+      - name: Configure AWS credentials for R2
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws-region: auto
+
+      - name: Upload release artifacts to R2
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENDPOINT="${{ steps.meta.outputs.endpoint }}"
+          PREFIX="${{ steps.meta.outputs.prefix }}"
+
+          aws s3 cp dist/packages "s3://${R2_BUCKET}/${PREFIX}/" \
+            --recursive \
+            --endpoint-url "${ENDPOINT}" \
+            --only-show-errors
+
+          aws s3 cp dist/latest.json "s3://${R2_BUCKET}/releases/latest.json" \
+            --endpoint-url "${ENDPOINT}" \
+            --content-type "application/json" \
+            --cache-control "no-store" \
+            --only-show-errors
+
+      - name: Upload build outputs as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xfo-miner-release-${{ steps.meta.outputs.release_tag }}
+          path: |
+            xfo-miner/dist/packages/*
+            xfo-miner/dist/latest.json

@@ -1,0 +1,68 @@
+name: miner-ci
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'xfo-miner/**'
+      - 'xfo-miner/.github/workflows/miner-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'xfo-miner/**'
+      - 'xfo-miner/.github/workflows/miner-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+
+    defaults:
+      run:
+        working-directory: xfo-miner
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          BIN="xfo-miner-${GOOS}-${GOARCH}${{ matrix.ext }}"
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "dist/${BIN}" ./cmd/xfo-miner
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xfo-miner-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: xfo-miner/dist/*
