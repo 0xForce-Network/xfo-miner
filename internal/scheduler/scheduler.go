@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -37,6 +38,10 @@ type otaUpdater interface {
 	Execute(context.Context, *pool.OTAUpdateMessage) error
 }
 
+type otaPoller interface {
+	Run(context.Context) error
+}
+
 type inboundMessage struct {
 	msgType string
 	raw     json.RawMessage
@@ -59,6 +64,7 @@ type Scheduler struct {
 	containerRunner containerRunner
 	xmrigManager    xmrigController
 	updater         otaUpdater
+	newPoller       func(currentVer updater.Version, onUpdate func(context.Context, *pool.OTAUpdateMessage) error) otaPoller
 	messageCh       chan inboundMessage
 	idleMinerPid    int
 	startDetached   func(command string, args []string) (*process.DetachedProcess, error)
@@ -87,6 +93,11 @@ func New(cfg *config.Config, version string, capabilities *env.SystemCapabilitie
 
 	s.hashcatRunner = NewHashcatRunner(procManager, logger)
 	s.containerRunner = NewContainerRunner(procManager, logger)
+	s.newPoller = func(currentVer updater.Version, onUpdate func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
+		interval := time.Duration(cfg.AutoUpdate.PollIntervalSec) * time.Second
+		jitterMax := time.Duration(cfg.AutoUpdate.JitterMaxSec) * time.Second
+		return updater.NewPoller(cfg.AutoUpdate.CDNURL, interval, jitterMax, currentVer, nil, logger, onUpdate)
+	}
 	up, err := updater.New(logger)
 	if err != nil {
 		s.logger.Error("failed to initialize OTA updater", "error", err)
@@ -148,6 +159,8 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		return err
 	}
 
+	s.startOTAPoller(ctx)
+
 	defer func() {
 		_ = s.stopIdleMiner(context.Background())
 		_ = s.xmrigManager.Stop(context.Background())
@@ -163,6 +176,65 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			s.handleMessage(ctx, msg)
 		}
 	}
+}
+
+func (s *Scheduler) startOTAPoller(ctx context.Context) {
+	if !s.cfg.AutoUpdate.Enabled {
+		return
+	}
+
+	semver := normalizeSemverLike(s.version)
+	currentVer, err := updater.ParseVersion(semver)
+	if err != nil {
+		s.logger.Warn("failed to parse scheduler version for OTA poller; skipping proactive polling", "version", s.version, "error", err)
+		return
+	}
+	if s.newPoller == nil {
+		return
+	}
+
+	p := s.newPoller(currentVer, func(runCtx context.Context, ota *pool.OTAUpdateMessage) error {
+		if ota == nil {
+			return nil
+		}
+		if ota.Type == "" {
+			ota.Type = "update_required"
+		}
+		raw, err := json.Marshal(ota)
+		if err != nil {
+			return fmt.Errorf("marshal ota payload: %w", err)
+		}
+
+		select {
+		case s.messageCh <- inboundMessage{msgType: "update_required", raw: raw}:
+			return nil
+		case <-runCtx.Done():
+			return runCtx.Err()
+		default:
+			s.logger.Warn("dropping OTA poller message due to full queue")
+			return nil
+		}
+	})
+	if p == nil {
+		return
+	}
+
+	go func() {
+		if err := p.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.logger.Warn("OTA poller exited with error", "error", err)
+		}
+	}()
+}
+
+func normalizeSemverLike(ver string) string {
+	v := strings.TrimSpace(strings.TrimPrefix(ver, "v"))
+	if idx := strings.Index(v, "-"); idx >= 0 {
+		v = v[:idx]
+	}
+	if idx := strings.Index(v, "+"); idx >= 0 {
+		v = v[:idx]
+	}
+	return v
 }
 
 func (s *Scheduler) CurrentState() State {
@@ -233,18 +305,16 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 	}
 }
 
-func (s *Scheduler) handleOTAUpdate(_ context.Context, ota *pool.OTAUpdateMessage) {
-	if !s.cfg.AutoUpdate.Enabled {
-		s.logger.Warn("OTA update available but auto_update is disabled", "latest_version", ota.LatestVersion)
-		return
-	}
-
+func (s *Scheduler) handleOTAUpdate(parentCtx context.Context, ota *pool.OTAUpdateMessage) {
 	if s.updater == nil {
 		s.logger.Error("OTA update requested but updater is not initialized", "latest_version", ota.LatestVersion)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Minute)
 	defer cancel()
 
 	if err := s.stopIdleMiner(ctx); err != nil {

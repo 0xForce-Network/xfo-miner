@@ -103,9 +103,39 @@ func (u *Updater) Execute(ctx context.Context, ota *pool.OTAUpdateMessage) error
 			continue
 		}
 
-		u.logger.Info("OTA package verified", "url", parsed.String(), "latest_version", ota.LatestVersion)
-		if err := u.swapFn(ctx, tmpFile); err != nil {
+		artifactPath := tmpFile
+		archiveFormat, err := detectArchiveFormat(parsed.Path, tmpFile)
+		if err != nil {
 			_ = os.Remove(tmpFile)
+			attemptErrs = append(attemptErrs, fmt.Errorf("detect archive format from %s: %w", parsed.String(), err))
+			continue
+		}
+		if archiveFormat != archiveFormatNone {
+			extractDir, err := os.MkdirTemp(filepath.Dir(u.executablePath), ".xfo-miner-extract-*")
+			if err != nil {
+				_ = os.Remove(tmpFile)
+				attemptErrs = append(attemptErrs, fmt.Errorf("create extract temp dir: %w", err))
+				continue
+			}
+			if err := ExtractArchive(tmpFile, extractDir); err != nil {
+				_ = os.Remove(tmpFile)
+				_ = os.RemoveAll(extractDir)
+				attemptErrs = append(attemptErrs, fmt.Errorf("extract archive from %s: %w", parsed.String(), err))
+				continue
+			}
+			_ = os.Remove(tmpFile)
+
+			artifactPath, err = locateExtractedBinary(extractDir, filepath.Base(u.executablePath))
+			if err != nil {
+				_ = os.RemoveAll(extractDir)
+				attemptErrs = append(attemptErrs, fmt.Errorf("locate executable in archive from %s: %w", parsed.String(), err))
+				continue
+			}
+		}
+
+		u.logger.Info("OTA package verified", "url", parsed.String(), "latest_version", ota.LatestVersion)
+		if err := u.swapFn(ctx, artifactPath); err != nil {
+			_ = os.Remove(artifactPath)
 			return fmt.Errorf("apply ota update: %w", err)
 		}
 		return nil

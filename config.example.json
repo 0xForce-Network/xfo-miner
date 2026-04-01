@@ -4,13 +4,11 @@
   "worker_name": "Rig-4090-Alpha",
   "pool_url": "",
   "max_cpu_threads": 4,
-  "multisig": {
-    "enabled": false,
-    "wallet_rpc_url": "http://127.0.0.1:18083/json_rpc",
-    "oracle_api_url": "http://127.0.0.1:8081"
-  },
   "auto_update": {
-    "enabled": true
+    "enabled": true,
+    "cdn_url": "https://update.xfo.network/releases/latest.json",
+    "poll_interval_sec": 14400,
+    "jitter_max_sec": 1800
   },
   "cpu_mining": {
     "enabled": true,

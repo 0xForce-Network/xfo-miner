@@ -13,7 +13,6 @@ import (
 
 	"github.com/0xforce/xfo-miner/internal/config"
 	"github.com/0xforce/xfo-miner/internal/env"
-	"github.com/0xforce/xfo-miner/internal/multisig"
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
 	"github.com/0xforce/xfo-miner/internal/scheduler"
@@ -113,14 +112,6 @@ func main() {
 		logger.Warn("L2 pool WebSocket DISABLED — running in L1-only mode (no telemetry, no GPU tasks)")
 	}
 
-	if cfg.Multisig.Enabled {
-		_ = multisig.NewStakingManager(multisig.StakingConfig{
-			WalletRPCURL: cfg.Multisig.WalletRPCURL,
-			OracleAPIURL: cfg.Multisig.OracleAPIURL,
-		}, logger)
-		logger.Info("multisig staking manager initialized", "wallet_rpc", cfg.Multisig.WalletRPCURL, "oracle_api", cfg.Multisig.OracleAPIURL)
-	}
-
 	s := scheduler.New(cfg, version, capabilities, process.NewRealManager(logger, process.WithLogDir(*logDir)), poolClient, logger)
 	if err := s.Run(ctx); err != nil {
 		logger.Error("scheduler exited with error", "error", err)
@@ -154,12 +145,6 @@ CONFIG FILE PARAMETERS (config.json):
     worker_name          (string)  Human-readable worker/rig name (required)
     pool_url             (string)  Pool WebSocket endpoint, wss:// or ws:// (optional; leave empty for L1-only mode)
     max_cpu_threads      (int)     Max CPU threads for task execution (default: half of system CPUs)
-
-  multisig:
-    enabled              (bool)    Enable multisig staking integration (default: false)
-    wallet_rpc_url       (string)  Monero wallet RPC URL for multisig operations
-    oracle_api_url       (string)  Oracle bridge API URL for staking verification
-
   auto_update:
     enabled              (bool)    Enable OTA auto-update (default: false)
 

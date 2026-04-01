@@ -20,21 +20,23 @@ type Config struct {
 	WorkerName    string           `json:"worker_name"`
 	PoolURL       string           `json:"pool_url"`
 	MaxCPUThreads int              `json:"max_cpu_threads"`
-	Multisig      MultisigConfig   `json:"multisig"`
 	AutoUpdate    AutoUpdateConfig `json:"auto_update"`
 	IdleBehavior  IdleBehavior     `json:"idle_behavior"`
 	CPUMining     CPUMiningConfig  `json:"cpu_mining"`
 }
 
-type MultisigConfig struct {
-	Enabled      bool   `json:"enabled"`
-	WalletRPCURL string `json:"wallet_rpc_url"`
-	OracleAPIURL string `json:"oracle_api_url"`
+type AutoUpdateConfig struct {
+	Enabled         bool   `json:"enabled"`
+	CDNURL          string `json:"cdn_url"`
+	PollIntervalSec int    `json:"poll_interval_sec"`
+	JitterMaxSec    int    `json:"jitter_max_sec"`
 }
 
-type AutoUpdateConfig struct {
-	Enabled bool `json:"enabled"`
-}
+const (
+	defaultAutoUpdateCDNURL          = "https://update.xfo.network/releases/latest.json"
+	defaultAutoUpdatePollIntervalSec = 14400
+	defaultAutoUpdateJitterMaxSec    = 1800
+)
 
 type IdleBehavior struct {
 	Enabled        bool   `json:"enabled"`
@@ -117,6 +119,16 @@ func (c *Config) applyDefaults() error {
 		c.CPUMining.MaxThreads = c.MaxCPUThreads
 	}
 
+	if strings.TrimSpace(c.AutoUpdate.CDNURL) == "" {
+		c.AutoUpdate.CDNURL = defaultAutoUpdateCDNURL
+	}
+	if c.AutoUpdate.PollIntervalSec <= 0 {
+		c.AutoUpdate.PollIntervalSec = defaultAutoUpdatePollIntervalSec
+	}
+	if c.AutoUpdate.JitterMaxSec <= 0 {
+		c.AutoUpdate.JitterMaxSec = defaultAutoUpdateJitterMaxSec
+	}
+
 	return nil
 }
 
@@ -173,15 +185,15 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.Multisig.Enabled {
-		rpcURL, err := url.Parse(c.Multisig.WalletRPCURL)
-		if err != nil || rpcURL.Host == "" || (rpcURL.Scheme != "http" && rpcURL.Scheme != "https") {
-			validationErrs = append(validationErrs, errors.New("multisig.wallet_rpc_url must be a valid http(s) URL when multisig.enabled is true"))
-		}
-		oracleURL, err := url.Parse(c.Multisig.OracleAPIURL)
-		if err != nil || oracleURL.Host == "" || (oracleURL.Scheme != "http" && oracleURL.Scheme != "https") {
-			validationErrs = append(validationErrs, errors.New("multisig.oracle_api_url must be a valid http(s) URL when multisig.enabled is true"))
-		}
+	if c.AutoUpdate.PollIntervalSec < 1 {
+		validationErrs = append(validationErrs, errors.New("auto_update.poll_interval_sec must be >= 1"))
+	}
+	if c.AutoUpdate.JitterMaxSec < 0 {
+		validationErrs = append(validationErrs, errors.New("auto_update.jitter_max_sec must be >= 0"))
+	}
+	cdnURL, err := url.Parse(c.AutoUpdate.CDNURL)
+	if err != nil || cdnURL.Host == "" || (cdnURL.Scheme != "https" && cdnURL.Scheme != "http") {
+		validationErrs = append(validationErrs, errors.New("auto_update.cdn_url must be a valid http(s) URL"))
 	}
 
 	if len(validationErrs) > 0 {

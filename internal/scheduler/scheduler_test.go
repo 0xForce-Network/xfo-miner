@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/0xforce/xfo-miner/internal/env"
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
+	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
 type mockProcessManager struct {
@@ -215,6 +217,110 @@ type mockOTAUpdater struct {
 	called int
 }
 
+type mockXMRigController struct {
+	mu             sync.Mutex
+	heartbeatCalls int
+	fullCalls      int
+	startCalls     int
+	stopCalls      int
+}
+
+func (m *mockXMRigController) Start(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.startCalls++
+	return nil
+}
+
+func (m *mockXMRigController) SetFullMode(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fullCalls++
+	return nil
+}
+
+func (m *mockXMRigController) SetHeartbeatMode(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.heartbeatCalls++
+	return nil
+}
+
+func (m *mockXMRigController) Stop(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopCalls++
+	return nil
+}
+
+func (m *mockXMRigController) heartbeatCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.heartbeatCalls
+}
+
+func (m *mockXMRigController) fullCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.fullCalls
+}
+
+type contextAwareOTAUpdater struct {
+	mu             sync.Mutex
+	seenContextErr error
+	called         int
+}
+
+func (m *contextAwareOTAUpdater) Execute(ctx context.Context, _ *pool.OTAUpdateMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.called++
+	m.seenContextErr = ctx.Err()
+	if m.seenContextErr != nil {
+		return m.seenContextErr
+	}
+	return nil
+}
+
+func (m *contextAwareOTAUpdater) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.called
+}
+
+func (m *contextAwareOTAUpdater) contextErr() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.seenContextErr
+}
+
+type mockOTAPoller struct {
+	mu     sync.Mutex
+	runs   int
+	runCh  chan struct{}
+	errRun error
+}
+
+func (m *mockOTAPoller) Run(ctx context.Context) error {
+	m.mu.Lock()
+	m.runs++
+	runCh := m.runCh
+	err := m.errRun
+	m.mu.Unlock()
+
+	if runCh != nil {
+		select {
+		case runCh <- struct{}{}:
+		default:
+		}
+	}
+	if err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return nil
+}
+
 func (m *mockOTAUpdater) Execute(_ context.Context, _ *pool.OTAUpdateMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -256,6 +362,9 @@ func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient, *mock
 	s.hashcatRunner = &mockHashcatRunner{}
 	s.containerRunner = &mockContainerRunner{}
 	s.updater = &mockOTAUpdater{}
+	s.newPoller = func(_ updater.Version, _ func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
+		return &mockOTAPoller{}
+	}
 	s.startDetached = detached.start
 	s.stopDetached = detached.stop
 	s.isDetachedAlive = detached.alive
@@ -394,6 +503,30 @@ func TestSchedulerHandlesOTAUpdateRequired(t *testing.T) {
 	waitFor(t, func() bool { return mockUpdater.callCount() >= 1 })
 }
 
+func TestSchedulerHandlesOTAUpdateRequiredWhenAutoUpdateDisabled(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.cfg.AutoUpdate.Enabled = false
+	mockUpdater, ok := s.updater.(*mockOTAUpdater)
+	if !ok {
+		t.Fatalf("expected mock ota updater")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.OTAUpdateMessage{
+		Type:          "update_required",
+		LatestVersion: "0.2.0",
+		DownloadURLs:  []string{"https://example.com/xfo-miner"},
+		Checksum:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+
+	waitFor(t, func() bool { return mockUpdater.callCount() >= 1 })
+}
+
 func TestSchedulerRunConnectFailDoesNotExitFatal(t *testing.T) {
 	s, _, pcl, detached := newTestScheduler()
 	pcl.connectErr = context.DeadlineExceeded
@@ -446,4 +579,138 @@ func TestSchedulerRunLoginFailDoesNotExitFatal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run() did not exit after context cancel")
 	}
+}
+
+func TestSchedulerStartsPollerWhenAutoUpdateEnabled(t *testing.T) {
+	s, _, _, detached := newTestScheduler()
+
+	runCh := make(chan struct{}, 1)
+	created := 0
+	s.newPoller = func(_ updater.Version, _ func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
+		created++
+		return &mockOTAPoller{runCh: runCh}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(ctx) }()
+
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+	waitFor(t, func() bool {
+		select {
+		case <-runCh:
+			return true
+		default:
+			return false
+		}
+	})
+	if created != 1 {
+		t.Fatalf("expected poller to be created once, got %d", created)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not exit after context cancel")
+	}
+}
+
+func TestSchedulerSkipsPollerWhenAutoUpdateDisabled(t *testing.T) {
+	s, _, _, detached := newTestScheduler()
+	s.cfg.AutoUpdate.Enabled = false
+
+	created := 0
+	s.newPoller = func(_ updater.Version, _ func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
+		created++
+		return &mockOTAPoller{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(ctx) }()
+
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+	time.Sleep(50 * time.Millisecond)
+	if created != 0 {
+		t.Fatalf("expected poller not to be created, got %d", created)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not exit after context cancel")
+	}
+}
+
+func TestSchedulerRestoreStandbyAfterOTAFailure(t *testing.T) {
+	s, _, _, detached := newTestScheduler()
+
+	xm := &mockXMRigController{}
+	s.xmrigManager = xm
+	s.updater = otaUpdaterFunc(func(_ context.Context, _ *pool.OTAUpdateMessage) error {
+		return context.DeadlineExceeded
+	})
+
+	if err := s.enterStandby(context.Background()); err != nil {
+		t.Fatalf("enterStandby() error = %v", err)
+	}
+
+	s.handleOTAUpdate(context.Background(), &pool.OTAUpdateMessage{
+		Type:          "update_required",
+		LatestVersion: "0.2.0",
+		DownloadURLs:  []string{"https://example.com/xfo-miner"},
+		Checksum:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+
+	if s.CurrentState() != StateStandby {
+		t.Fatalf("expected standby after OTA failure, got %s", s.CurrentState())
+	}
+	if xm.heartbeatCount() < 1 {
+		t.Fatalf("expected xmrig heartbeat mode before OTA")
+	}
+	if xm.fullCount() < 2 {
+		t.Fatalf("expected xmrig full mode restored after OTA failure, got %d", xm.fullCount())
+	}
+	if detached.startCount() < 2 {
+		t.Fatalf("expected idle miner restarted after OTA failure")
+	}
+}
+
+func TestSchedulerOTAUsesParentContextCancellation(t *testing.T) {
+	s, _, _, _ := newTestScheduler()
+
+	ctxUpdater := &contextAwareOTAUpdater{}
+	s.updater = ctxUpdater
+	s.xmrigManager = &mockXMRigController{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s.handleOTAUpdate(ctx, &pool.OTAUpdateMessage{
+		Type:          "update_required",
+		LatestVersion: "0.2.0",
+		DownloadURLs:  []string{"https://example.com/xfo-miner"},
+		Checksum:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+
+	if ctxUpdater.callCount() != 1 {
+		t.Fatalf("expected updater to be invoked once, got %d", ctxUpdater.callCount())
+	}
+	if !errors.Is(ctxUpdater.contextErr(), context.Canceled) {
+		t.Fatalf("expected updater context canceled, got %v", ctxUpdater.contextErr())
+	}
+}
+
+type otaUpdaterFunc func(context.Context, *pool.OTAUpdateMessage) error
+
+func (f otaUpdaterFunc) Execute(ctx context.Context, ota *pool.OTAUpdateMessage) error {
+	return f(ctx, ota)
 }
