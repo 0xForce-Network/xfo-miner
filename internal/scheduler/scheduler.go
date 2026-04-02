@@ -91,7 +91,7 @@ func New(cfg *config.Config, version string, capabilities *env.SystemCapabilitie
 		isDetachedAlive: process.IsProcessRunning,
 	}
 
-	s.hashcatRunner = NewHashcatRunner(procManager, logger)
+	s.hashcatRunner = NewHashcatRunner(procManager, cfg.HashcatPath, logger)
 	s.containerRunner = NewContainerRunner(procManager, logger)
 	s.newPoller = func(currentVer updater.Version, onUpdate func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
 		interval := time.Duration(cfg.AutoUpdate.PollIntervalSec) * time.Second
@@ -125,11 +125,12 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	})
 
 	login := &pool.LoginMessage{
-		Type:       "login",
-		NodeID:     s.cfg.NodeID,
-		WorkerName: s.cfg.WorkerName,
-		Version:    s.version,
-		OS:         runtime.GOOS + "-" + runtime.GOARCH,
+		Type:          "login",
+		NodeID:        s.cfg.NodeID,
+		WalletAddress: s.cfg.WalletAddress,
+		WorkerName:    s.cfg.WorkerName,
+		Version:       s.version,
+		OS:            runtime.GOOS + "-" + runtime.GOARCH,
 		Capabilities: &pool.CapabilitiesData{
 			HasGPU:         s.capabilities.HasGPU,
 			GPUCount:       len(s.capabilities.GPUs),
@@ -375,9 +376,11 @@ func (s *Scheduler) enterWPAAudit(ctx context.Context, job *pool.JobGPUMessage) 
 
 	return s.hashcatRunner.Run(ctx, job,
 		func(msg *pool.ProgressMessage) {
+			msg.ParentJobID = job.ParentJobID
 			_ = s.poolClient.SendProgress(msg)
 		},
 		func(msg *pool.ResultMessage) {
+			msg.ParentJobID = job.ParentJobID
 			_ = s.poolClient.SendResult(msg)
 		},
 	)

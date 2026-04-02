@@ -111,8 +111,12 @@ func detectCLInfo(ctx context.Context) ([]GPUInfo, error) {
 	return gpus, nil
 }
 
-func DetectHashcat(ctx context.Context) (*HashcatInfo, error) {
-	output, err := runCommand(ctx, commandTimeout, "hashcat", "--version")
+func DetectHashcat(ctx context.Context, hashcatPath string) (*HashcatInfo, error) {
+	if strings.TrimSpace(hashcatPath) == "" {
+		hashcatPath = "hashcat"
+	}
+
+	output, err := runCommand(ctx, commandTimeout, hashcatPath, "--version")
 	if err != nil {
 		return &HashcatInfo{Available: false}, err
 	}

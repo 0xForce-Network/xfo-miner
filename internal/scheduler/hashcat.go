@@ -22,13 +22,17 @@ var (
 type HashcatRunner struct {
 	procManager process.Manager
 	logger      *slog.Logger
+	hashcatPath string
 }
 
-func NewHashcatRunner(procManager process.Manager, logger *slog.Logger) *HashcatRunner {
+func NewHashcatRunner(procManager process.Manager, hashcatPath string, logger *slog.Logger) *HashcatRunner {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &HashcatRunner{procManager: procManager, logger: logger}
+	if strings.TrimSpace(hashcatPath) == "" {
+		hashcatPath = "hashcat"
+	}
+	return &HashcatRunner{procManager: procManager, logger: logger, hashcatPath: hashcatPath}
 }
 
 func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProgress func(*pool.ProgressMessage), onResult func(*pool.ResultMessage)) error {
@@ -46,7 +50,7 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 	}
 
 	procName := "hashcat_" + job.JobID
-	proc, err := r.procManager.Start(ctx, procName, "hashcat", args)
+	proc, err := r.procManager.Start(ctx, procName, r.hashcatPath, args)
 	if err != nil {
 		return fmt.Errorf("start hashcat: %w", err)
 	}

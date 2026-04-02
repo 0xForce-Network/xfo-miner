@@ -19,6 +19,7 @@ type Config struct {
 	WalletAddress string           `json:"wallet_address"`
 	WorkerName    string           `json:"worker_name"`
 	PoolURL       string           `json:"pool_url"`
+	HashcatPath   string           `json:"hashcat_path"`
 	MaxCPUThreads int              `json:"max_cpu_threads"`
 	AutoUpdate    AutoUpdateConfig `json:"auto_update"`
 	IdleBehavior  IdleBehavior     `json:"idle_behavior"`
@@ -101,6 +102,10 @@ func (c *Config) applyDefaults() error {
 		c.NodeID = generateNodeID(c.WalletAddress, c.WorkerName)
 	}
 
+	if strings.TrimSpace(c.HashcatPath) == "" {
+		c.HashcatPath = "hashcat"
+	}
+
 	if c.MaxCPUThreads == 0 {
 		cpu := runtime.NumCPU() / 2
 		if cpu < 1 {
@@ -148,6 +153,13 @@ func (c *Config) Validate() error {
 	}
 
 	if c.L2Enabled() {
+		walletAddress := strings.TrimSpace(c.WalletAddress)
+		if walletAddress == "" {
+			validationErrs = append(validationErrs, errors.New("wallet_address is required when pool_url is configured (L2 mode)"))
+		} else if !isValidXfoAddress(walletAddress) {
+			validationErrs = append(validationErrs, errors.New("wallet_address must be a valid XFo/XFs address (95-106 chars, base58)"))
+		}
+
 		pool, err := url.Parse(c.PoolURL)
 		if err != nil {
 			validationErrs = append(validationErrs, fmt.Errorf("pool_url invalid: %w", err))

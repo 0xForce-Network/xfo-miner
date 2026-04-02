@@ -15,7 +15,7 @@ func TestLoadConfigAppliesDefaultCPUThreads(t *testing.T) {
 	path := filepath.Join(tempDir, "config.json")
 	content := `{
 	  "node_id": "node-1",
-	  "wallet_address": "",
+	  "wallet_address": "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 0,
@@ -244,6 +244,82 @@ func TestLoadConfigWalletAddressValidation(t *testing.T) {
 	}
 }
 
+func TestLoadConfigL2RequiresWalletAddress(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "l2-wallet-required.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "",
+	  "worker_name": "worker-1",
+	  "pool_url": "wss://pool.example.com/ws",
+	  "max_cpu_threads": 2,
+	  "auto_update": {
+	    "enabled": true
+	  },
+	  "cpu_mining": {
+	    "enabled": false,
+	    "xmrig_path": "",
+	    "stratum_url": "",
+	    "max_threads": 0,
+	    "background_threads": 0
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatalf("expected validation error for missing wallet_address in L2 mode")
+	}
+}
+
+func TestLoadConfigL2WalletAddressValidation(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "l2-wallet-invalid.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "XFo_too_short",
+	  "worker_name": "worker-1",
+	  "pool_url": "wss://pool.example.com/ws",
+	  "max_cpu_threads": 2,
+	  "auto_update": {
+	    "enabled": true
+	  },
+	  "cpu_mining": {
+	    "enabled": false,
+	    "xmrig_path": "",
+	    "stratum_url": "",
+	    "max_threads": 0,
+	    "background_threads": 0
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatalf("expected validation error for invalid wallet_address in L2 mode")
+	}
+}
+
 func TestLoadConfigEmptyPoolURLAllowed(t *testing.T) {
 	t.Parallel()
 
@@ -425,5 +501,92 @@ func TestLoadConfigAutoUpdateInvalidCDNURL(t *testing.T) {
 
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatalf("expected validation error for invalid auto_update.cdn_url")
+	}
+}
+
+func TestLoadConfigHashcatPathDefault(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "hashcat-path-default.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "",
+	  "worker_name": "worker-1",
+	  "pool_url": "",
+	  "max_cpu_threads": 2,
+	  "auto_update": {
+	    "enabled": true
+	  },
+	  "cpu_mining": {
+	    "enabled": false,
+	    "xmrig_path": "",
+	    "stratum_url": "",
+	    "max_threads": 0,
+	    "background_threads": 0
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if cfg.HashcatPath != "hashcat" {
+		t.Fatalf("unexpected hashcat path default: got %q want %q", cfg.HashcatPath, "hashcat")
+	}
+}
+
+func TestLoadConfigHashcatPathCustom(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "hashcat-path-custom.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "",
+	  "worker_name": "worker-1",
+	  "pool_url": "",
+	  "hashcat_path": "/opt/hashcat/hashcat",
+	  "max_cpu_threads": 2,
+	  "auto_update": {
+	    "enabled": true
+	  },
+	  "cpu_mining": {
+	    "enabled": false,
+	    "xmrig_path": "",
+	    "stratum_url": "",
+	    "max_threads": 0,
+	    "background_threads": 0
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if cfg.HashcatPath != "/opt/hashcat/hashcat" {
+		t.Fatalf("unexpected hashcat path: got %q", cfg.HashcatPath)
 	}
 }

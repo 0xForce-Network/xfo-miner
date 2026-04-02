@@ -59,10 +59,11 @@ func TestConnectAndLogin(t *testing.T) {
 	}
 
 	login := &LoginMessage{
-		NodeID:     "node-1",
-		WorkerName: "worker-a",
-		Version:    "0.1.0",
-		OS:         "linux-amd64",
+		NodeID:        "node-1",
+		WalletAddress: "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
+		WorkerName:    "worker-a",
+		Version:       "0.1.0",
+		OS:            "linux-amd64",
 		Capabilities: &CapabilitiesData{
 			HasGPU:       true,
 			GPUCount:     1,
@@ -78,7 +79,7 @@ func TestConnectAndLogin(t *testing.T) {
 
 	select {
 	case got := <-received:
-		if got.Type != "login" || got.NodeID != login.NodeID || got.Version != login.Version || got.OS != login.OS || got.Capabilities == nil || got.Capabilities.BenchmarkKHs != 1234.5 {
+		if got.Type != "login" || got.NodeID != login.NodeID || got.WalletAddress != login.WalletAddress || got.Version != login.Version || got.OS != login.OS || got.Capabilities == nil || got.Capabilities.BenchmarkKHs != 1234.5 {
 			t.Fatalf("unexpected login payload: %#v", got)
 		}
 	case <-time.After(2 * time.Second):

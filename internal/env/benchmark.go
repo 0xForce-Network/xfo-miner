@@ -18,8 +18,12 @@ type BenchmarkResult struct {
 	GPUName  string
 }
 
-func RunHashcatBenchmark(ctx context.Context) (*BenchmarkResult, error) {
-	output, err := runCommand(ctx, 60*time.Second, "hashcat", "-b", "-m", "22000", "--machine-readable")
+func RunHashcatBenchmark(ctx context.Context, hashcatPath string) (*BenchmarkResult, error) {
+	if strings.TrimSpace(hashcatPath) == "" {
+		hashcatPath = "hashcat"
+	}
+
+	output, err := runCommand(ctx, 60*time.Second, hashcatPath, "-b", "-m", "22000", "--machine-readable")
 	if err != nil {
 		return nil, err
 	}

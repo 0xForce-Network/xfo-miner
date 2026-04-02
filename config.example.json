@@ -3,6 +3,7 @@
   "wallet_address": "XFo...<YOUR_WALLET_ADDRESS>",
   "worker_name": "Rig-4090-Alpha",
   "pool_url": "",
+  "hashcat_path": "hashcat",
   "max_cpu_threads": 4,
   "auto_update": {
     "enabled": true,

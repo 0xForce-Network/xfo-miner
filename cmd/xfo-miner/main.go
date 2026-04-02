@@ -56,7 +56,7 @@ func main() {
 		"idle_enabled", cfg.IdleBehavior.Enabled,
 	)
 
-	capabilities, capErr := env.ProbeAll(context.Background())
+	capabilities, capErr := env.ProbeAll(context.Background(), cfg.HashcatPath)
 	if capErr != nil {
 		logger.Warn("environment probe completed with warnings", "error", capErr)
 	}

@@ -23,12 +23,13 @@ type CapabilitiesData struct {
 
 // Miner -> Pool
 type LoginMessage struct {
-	Type         string            `json:"type"`
-	NodeID       string            `json:"node_id"`
-	WorkerName   string            `json:"worker_name"`
-	Version      string            `json:"version"`
-	OS           string            `json:"os"`
-	Capabilities *CapabilitiesData `json:"capabilities"`
+	Type          string            `json:"type"`
+	NodeID        string            `json:"node_id"`
+	WalletAddress string            `json:"wallet_address"`
+	WorkerName    string            `json:"worker_name"`
+	Version       string            `json:"version"`
+	OS            string            `json:"os"`
+	Capabilities  *CapabilitiesData `json:"capabilities"`
 }
 
 type HeartbeatMessage struct {
@@ -36,18 +37,20 @@ type HeartbeatMessage struct {
 }
 
 type ProgressMessage struct {
-	Type    string  `json:"type"`
-	JobID   string  `json:"job_id"`
-	Current int64   `json:"current"`
-	Total   int64   `json:"total"`
-	Percent float64 `json:"percent"`
+	Type        string  `json:"type"`
+	JobID       string  `json:"job_id"`
+	ParentJobID string  `json:"parent_job_id,omitempty"`
+	Current     int64   `json:"current"`
+	Total       int64   `json:"total"`
+	Percent     float64 `json:"percent"`
 }
 
 type ResultMessage struct {
-	Type   string `json:"type"`
-	JobID  string `json:"job_id"`
-	Status string `json:"status"`
-	Data   string `json:"data"`
+	Type        string `json:"type"`
+	JobID       string `json:"job_id"`
+	ParentJobID string `json:"parent_job_id,omitempty"`
+	Status      string `json:"status"`
+	Data        string `json:"data"`
 }
 
 type ContainerReadyMessage struct {
@@ -87,12 +90,14 @@ type ServerMessage struct {
 }
 
 type JobGPUMessage struct {
-	Type     string `json:"type"`
-	JobID    string `json:"job_id"`
-	HashMode int    `json:"hash_mode"`
-	Target   string `json:"target"`
-	Skip     int64  `json:"skip"`
-	Limit    int64  `json:"limit"`
+	Type        string `json:"type"`
+	JobID       string `json:"job_id"`
+	HashMode    int    `json:"hash_mode"`
+	Target      string `json:"target"`
+	Skip        int64  `json:"skip"`
+	Limit       int64  `json:"limit"`
+	ParentJobID string `json:"parent_job_id,omitempty"`
+	ChunkIndex  int    `json:"chunk_index,omitempty"`
 }
 
 type JobContainerMessage struct {

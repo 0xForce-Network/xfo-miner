@@ -25,7 +25,7 @@ type SystemCapabilities struct {
 	RunMode        string
 }
 
-func ProbeAll(ctx context.Context) (*SystemCapabilities, error) {
+func ProbeAll(ctx context.Context, hashcatPath string) (*SystemCapabilities, error) {
 	caps := &SystemCapabilities{RunMode: RunModeCPUOnly}
 	warnings := make([]error, 0)
 	caps.IsRoot = CheckRoot()
@@ -39,7 +39,7 @@ func ProbeAll(ctx context.Context) (*SystemCapabilities, error) {
 		caps.GPUs = gpus
 	}
 
-	hashcatInfo, hashcatErr := DetectHashcat(ctx)
+	hashcatInfo, hashcatErr := DetectHashcat(ctx, hashcatPath)
 	if hashcatErr != nil {
 		warnings = append(warnings, hashcatErr)
 	}
@@ -66,7 +66,7 @@ func ProbeAll(ctx context.Context) (*SystemCapabilities, error) {
 	}
 
 	if caps.HasGPU && caps.HasHashcat {
-		benchmark, benchErr := RunHashcatBenchmark(ctx)
+		benchmark, benchErr := RunHashcatBenchmark(ctx, hashcatPath)
 		if benchErr != nil {
 			warnings = append(warnings, benchErr)
 		} else {
