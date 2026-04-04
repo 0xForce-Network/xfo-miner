@@ -2,28 +2,41 @@ package config
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
 
 // Config maps specs §4 config.json.
 type Config struct {
-	NodeID        string           `json:"node_id"`
-	WalletAddress string           `json:"wallet_address"`
-	WorkerName    string           `json:"worker_name"`
-	PoolURL       string           `json:"pool_url"`
-	HashcatPath   string           `json:"hashcat_path"`
-	MaxCPUThreads int              `json:"max_cpu_threads"`
-	AutoUpdate    AutoUpdateConfig `json:"auto_update"`
-	IdleBehavior  IdleBehavior     `json:"idle_behavior"`
-	CPUMining     CPUMiningConfig  `json:"cpu_mining"`
+	NodeID            string           `json:"node_id"`
+	WalletAddress     string           `json:"wallet_address"`
+	WorkerName        string           `json:"worker_name"`
+	HostPlatformID    string           `json:"host_platform_id,omitempty"`
+	PersistentMinerID string           `json:"persistent_miner_id,omitempty"`
+	PoolURL           string           `json:"pool_url"`
+	HashcatPath       string           `json:"hashcat_path"`
+	MaxCPUThreads     int              `json:"max_cpu_threads"`
+	AutoUpdate        AutoUpdateConfig `json:"auto_update"`
+	IdleBehavior      IdleBehavior     `json:"idle_behavior"`
+	CPUMining         CPUMiningConfig  `json:"cpu_mining"`
+	IdentityMode      string           `json:"identity_mode,omitempty"`
+	identityStatePath string           `json:"-"`
+}
+
+type identityState struct {
+	HostPlatformID    string `json:"host_platform_id"`
+	PersistentMinerID string `json:"persistent_miner_id"`
+	OldWorkerName     string `json:"old_worker_name,omitempty"`
+	MigrationCompleted bool  `json:"migration_completed"`
 }
 
 type AutoUpdateConfig struct {
@@ -58,6 +71,14 @@ func (c *Config) L2Enabled() bool {
 	return strings.TrimSpace(c.PoolURL) != ""
 }
 
+func (c *Config) IdentityStatePath() string {
+	return c.identityStatePath
+}
+
+func (c *Config) SetIdentityStatePath(path string) {
+	c.identityStatePath = strings.TrimSpace(path)
+}
+
 func generateNodeID(walletAddress, workerName string) string {
 	seed := strings.TrimSpace(walletAddress) + "|" + strings.TrimSpace(workerName)
 	sum := sha256.Sum256([]byte(seed))
@@ -90,11 +111,97 @@ func LoadConfig(path string) (*Config, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
+	if err := cfg.ensureStableIdentity(path); err != nil {
+		return nil, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
 	return &cfg, nil
+}
+
+func (c *Config) ensureStableIdentity(configPath string) error {
+	statePath := filepath.Clean(configPath) + ".identity_state.json"
+	c.identityStatePath = statePath
+	state := identityState{}
+	if raw, err := os.ReadFile(statePath); err == nil {
+		_ = json.Unmarshal(raw, &state)
+	}
+
+	if strings.TrimSpace(c.PersistentMinerID) == "" {
+		c.PersistentMinerID = strings.TrimSpace(state.PersistentMinerID)
+	}
+	if strings.TrimSpace(c.HostPlatformID) == "" {
+		c.HostPlatformID = strings.TrimSpace(state.HostPlatformID)
+	}
+
+	if strings.TrimSpace(c.PersistentMinerID) == "" {
+		id, err := newRandomID()
+		if err != nil {
+			return fmt.Errorf("generate persistent_miner_id: %w", err)
+		}
+		c.PersistentMinerID = id
+	}
+	if strings.TrimSpace(c.HostPlatformID) == "" {
+		c.HostPlatformID = detectHostPlatformID()
+	}
+
+	if strings.TrimSpace(state.OldWorkerName) == "" {
+		state.OldWorkerName = strings.TrimSpace(c.WorkerName)
+	}
+
+	if strings.TrimSpace(c.HostPlatformID) == "" {
+		c.IdentityMode = "legacy_host"
+	} else {
+		c.IdentityMode = "stable"
+	}
+
+	state.HostPlatformID = c.HostPlatformID
+	state.PersistentMinerID = c.PersistentMinerID
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal identity state: %w", err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		return fmt.Errorf("write identity state: %w", err)
+	}
+
+	return nil
+}
+
+func detectHostPlatformID() string {
+	candidates := []string{"/etc/machine-id", "/var/lib/dbus/machine-id"}
+	for _, p := range candidates {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		value := strings.ToLower(strings.TrimSpace(string(raw)))
+		if value != "" {
+			sum := sha256.Sum256([]byte(value))
+			return hex.EncodeToString(sum[:16])
+		}
+	}
+
+	hostname, err := os.Hostname()
+	if err == nil {
+		hostname = strings.TrimSpace(strings.ToLower(hostname))
+		if hostname != "" {
+			sum := sha256.Sum256([]byte(hostname))
+			return hex.EncodeToString(sum[:16])
+		}
+	}
+
+	return ""
+}
+
+func newRandomID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func (c *Config) applyDefaults() error {

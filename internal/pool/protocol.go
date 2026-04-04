@@ -23,13 +23,34 @@ type CapabilitiesData struct {
 
 // Miner -> Pool
 type LoginMessage struct {
-	Type          string            `json:"type"`
-	NodeID        string            `json:"node_id"`
-	WalletAddress string            `json:"wallet_address"`
-	WorkerName    string            `json:"worker_name"`
-	Version       string            `json:"version"`
-	OS            string            `json:"os"`
-	Capabilities  *CapabilitiesData `json:"capabilities"`
+	Type              string            `json:"type"`
+	NodeID            string            `json:"node_id"`
+	WalletAddress     string            `json:"wallet_address"`
+	WorkerName        string            `json:"worker_name"`
+	LegacyClaim       *LegacyClaim      `json:"legacy_claim,omitempty"`
+	HostPlatformID    string            `json:"host_platform_id,omitempty"`
+	PersistentMinerID string            `json:"persistent_miner_id,omitempty"`
+	IdentityMode      string            `json:"identity_mode,omitempty"`
+	Devices           []GPUIdentity     `json:"devices,omitempty"`
+	Version           string            `json:"version"`
+	OS                string            `json:"os"`
+	Capabilities      *CapabilitiesData `json:"capabilities"`
+}
+
+type LegacyClaim struct {
+	OldWorkerName  string `json:"old_worker_name"`
+	MigrationReason string `json:"migration_reason"`
+}
+
+type GPUIdentity struct {
+	DeviceIndex       int    `json:"device_index"`
+	VendorID          string `json:"vendor_id,omitempty"`
+	DeviceID          string `json:"device_id,omitempty"`
+	UUIDSource        string `json:"uuid_source,omitempty"`
+	GPUUUID           string `json:"gpu_uuid,omitempty"`
+	DeviceFingerprint string `json:"device_fingerprint,omitempty"`
+	PCIBusID          string `json:"pci_bus_id,omitempty"`
+	GPUModel          string `json:"gpu_model,omitempty"`
 }
 
 type HeartbeatMessage struct {
@@ -60,14 +81,19 @@ type ContainerReadyMessage struct {
 }
 
 type GPUDeviceTelemetry struct {
-	DeviceID        string  `json:"device_id"`
-	GPUModel        string  `json:"gpu_model"`
-	VRAMGB          float64 `json:"vram_gb"`
-	Status          string  `json:"status"`
-	ReputationScore float64 `json:"reputation_score"`
-	PCIBusID        string  `json:"pci_bus_id"`
-	Temperature     int     `json:"temperature_c,omitempty"`
-	Utilization     int     `json:"utilization_pct,omitempty"`
+	DeviceID          string  `json:"device_id"`
+	DeviceIndex       int     `json:"device_index,omitempty"`
+	VendorID          string  `json:"vendor_id,omitempty"`
+	UUIDSource        string  `json:"uuid_source,omitempty"`
+	GPUUUID           string  `json:"gpu_uuid,omitempty"`
+	DeviceFingerprint string  `json:"device_fingerprint,omitempty"`
+	GPUModel          string  `json:"gpu_model"`
+	VRAMGB            float64 `json:"vram_gb"`
+	Status            string  `json:"status"`
+	ReputationScore   float64 `json:"reputation_score"`
+	PCIBusID          string  `json:"pci_bus_id"`
+	Temperature       int     `json:"temperature_c,omitempty"`
+	Utilization       int     `json:"utilization_pct,omitempty"`
 }
 
 type TelemetryL1Message struct {
@@ -113,8 +139,10 @@ type PoolStatusMessage struct {
 }
 
 type LoginAckMessage struct {
-	Type   string `json:"type"`
-	Status string `json:"status"`
+	Type            string `json:"type"`
+	Status          string `json:"status"`
+	MigrationStatus string `json:"migration_status,omitempty"`
+	StakeRecovered  bool   `json:"stake_recovered,omitempty"`
 }
 
 type OTAUpdateMessage struct {

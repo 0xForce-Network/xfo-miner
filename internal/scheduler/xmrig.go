@@ -46,6 +46,7 @@ type XMRigManager struct {
 
 	mu          sync.Mutex
 	currentMode string
+	generation  uint64
 	stopped     bool
 	stopCh      chan struct{}
 }
@@ -124,15 +125,30 @@ func (m *XMRigManager) applyMode(ctx context.Context, mode string, threads int) 
 		return m.restartWithMode(ctx, mode, threads)
 	}
 
-	if err := m.setThreadsViaHTTPAPI(ctx, threads); err == nil {
-		m.mu.Lock()
-		m.currentMode = mode
-		m.mu.Unlock()
-		m.logger.Info("xmrig mode applied via HTTP API", "mode", mode, "threads", threads)
-		return nil
+	const maxAPIAttempts = 3
+	const apiRetryDelay = time.Second
+	var lastErr error
+	for attempt := 1; attempt <= maxAPIAttempts; attempt++ {
+		lastErr = m.setThreadsViaHTTPAPI(ctx, threads)
+		if lastErr == nil {
+			m.mu.Lock()
+			m.currentMode = mode
+			m.mu.Unlock()
+			m.logger.Info("xmrig mode applied via HTTP API", "mode", mode, "threads", threads, "attempt", attempt)
+			return nil
+		}
+
+		if attempt < maxAPIAttempts {
+			m.logger.Warn("xmrig HTTP API update failed, retrying", "mode", mode, "threads", threads, "attempt", attempt, "error", lastErr)
+			select {
+			case <-time.After(apiRetryDelay):
+			case <-ctx.Done():
+				return fmt.Errorf("xmrig HTTP API retry canceled: %w", ctx.Err())
+			}
+		}
 	}
 
-	m.logger.Warn("xmrig HTTP API update failed, falling back to restart", "mode", mode)
+	m.logger.Warn("xmrig HTTP API update failed, falling back to restart", "mode", mode, "threads", threads, "error", lastErr)
 	return m.restartWithMode(ctx, mode, threads)
 }
 
@@ -170,25 +186,51 @@ func (m *XMRigManager) restartWithModeLocked(ctx context.Context, mode string, t
 
 	proc, err := m.procManager.Start(ctx, xmrigProcessName, m.cfg.XMRigPath, args)
 	if err != nil {
+		m.logger.Error(
+			"xmrig start FAILED",
+			"mode", mode,
+			"threads", threads,
+			"error", err,
+			"generation", m.generation,
+		)
 		return fmt.Errorf("start xmrig (%s): %w", mode, err)
 	}
 
-	go m.watchProcessExit(proc.Done)
+	m.generation++
+	gen := m.generation
+	go m.watchProcessExit(proc.Done, gen)
 
 	m.currentMode = mode
-	m.logger.Info("xmrig mode applied", "mode", mode, "threads", threads)
+	m.logger.Info("xmrig mode applied", "mode", mode, "threads", threads, "generation", gen)
 	return nil
 }
 
-func (m *XMRigManager) watchProcessExit(done <-chan struct{}) {
+func (m *XMRigManager) watchProcessExit(done <-chan struct{}, startGen uint64) {
 	<-done
 
 	m.mu.Lock()
 	stopped := m.stopped
 	mode := m.currentMode
+	currentGen := m.generation
 	m.mu.Unlock()
 
 	if stopped || mode == "" {
+		m.logger.Info(
+			"xmrig watchdog exiting — manager stopped or mode cleared",
+			"stopped", stopped,
+			"mode", mode,
+			"start_generation", startGen,
+			"current_generation", currentGen,
+		)
+		return
+	}
+
+	if startGen != currentGen {
+		m.logger.Info(
+			"xmrig watchdog ignoring stale process exit",
+			"start_generation", startGen,
+			"current_generation", currentGen,
+		)
 		return
 	}
 
@@ -217,7 +259,7 @@ func (m *XMRigManager) watchProcessExit(done <-chan struct{}) {
 		err := m.restartWithMode(restartCtx, mode, threads)
 		cancel()
 		if err == nil {
-			m.logger.Info("xmrig watchdog restarted process", "mode", mode)
+			m.logger.Info("xmrig watchdog restarted process", "mode", mode, "generation", startGen)
 			return
 		}
 

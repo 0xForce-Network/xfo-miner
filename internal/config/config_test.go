@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -588,5 +589,73 @@ func TestLoadConfigHashcatPathCustom(t *testing.T) {
 
 	if cfg.HashcatPath != "/opt/hashcat/hashcat" {
 		t.Fatalf("unexpected hashcat path: got %q", cfg.HashcatPath)
+	}
+}
+
+func TestLoadConfigStableIdentityGeneratedAndPersisted(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "identity.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
+	  "worker_name": "worker-1",
+	  "pool_url": "",
+	  "max_cpu_threads": 2,
+	  "auto_update": {
+	    "enabled": true
+	  },
+	  "cpu_mining": {
+	    "enabled": false,
+	    "xmrig_path": "",
+	    "stratum_url": "",
+	    "max_threads": 0,
+	    "background_threads": 0
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	first, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() first error = %v", err)
+	}
+	if first.PersistentMinerID == "" || first.HostPlatformID == "" {
+		t.Fatalf("expected generated stable identities, got persistent=%q host=%q", first.PersistentMinerID, first.HostPlatformID)
+	}
+
+	second, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() second error = %v", err)
+	}
+	if first.PersistentMinerID != second.PersistentMinerID || first.HostPlatformID != second.HostPlatformID {
+		t.Fatalf("expected persisted identities, first=(%s,%s) second=(%s,%s)", first.PersistentMinerID, first.HostPlatformID, second.PersistentMinerID, second.HostPlatformID)
+	}
+
+	raw, err := os.ReadFile(first.IdentityStatePath())
+	if err != nil {
+		t.Fatalf("read identity state: %v", err)
+	}
+	var state struct {
+		OldWorkerName      string `json:"old_worker_name"`
+		MigrationCompleted bool   `json:"migration_completed"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode identity state: %v", err)
+	}
+	if state.OldWorkerName != "worker-1" {
+		t.Fatalf("expected old_worker_name worker-1, got %q", state.OldWorkerName)
+	}
+	if state.MigrationCompleted {
+		t.Fatalf("expected migration_completed=false by default")
 	}
 }

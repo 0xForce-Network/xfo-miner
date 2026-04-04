@@ -54,14 +54,19 @@ func (r *Reporter) ReportL2(_ context.Context, report L2Report) error {
 	devices := make([]pool.GPUDeviceTelemetry, 0, len(report.Devices))
 	for _, d := range report.Devices {
 		devices = append(devices, pool.GPUDeviceTelemetry{
-			DeviceID:        d.DeviceID,
-			GPUModel:        d.GPUModel,
-			VRAMGB:          d.VRAMGB,
-			Status:          d.Status,
-			ReputationScore: d.ReputationScore,
-			PCIBusID:        d.PCIBusID,
-			Temperature:     d.Temperature,
-			Utilization:     d.Utilization,
+			DeviceID:          d.DeviceID,
+			DeviceIndex:       d.DeviceIndex,
+			VendorID:          d.VendorID,
+			UUIDSource:        d.UUIDSource,
+			GPUUUID:           d.GPUUUID,
+			DeviceFingerprint: d.DeviceFingerprint,
+			GPUModel:          d.GPUModel,
+			VRAMGB:            d.VRAMGB,
+			Status:            d.Status,
+			ReputationScore:   d.ReputationScore,
+			PCIBusID:          d.PCIBusID,
+			Temperature:       d.Temperature,
+			Utilization:       d.Utilization,
 		})
 	}
 	return r.pool.SendTelemetryL2(&pool.TelemetryL2Message{Type: "telemetry_l2", Devices: devices, JobID: report.JobID})

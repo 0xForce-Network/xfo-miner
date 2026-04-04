@@ -105,6 +105,7 @@ func (m *RealManager) Stop(ctx context.Context, name string, gracePeriod time.Du
 
 	select {
 	case <-proc.Done:
+		m.remove(name)
 		m.logger.Info("process stopped gracefully", "name", name)
 		return nil
 	case <-time.After(gracePeriod):
@@ -121,6 +122,7 @@ func (m *RealManager) Stop(ctx context.Context, name string, gracePeriod time.Du
 
 	select {
 	case <-proc.Done:
+		m.remove(name)
 		m.logger.Info("process stopped forcefully", "name", name)
 		return nil
 	case <-ctx.Done():

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/0xforce/xfo-miner/internal/env"
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
+	"github.com/0xforce/xfo-miner/internal/telemetry"
 	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
@@ -111,10 +114,11 @@ func (m *mockProcessManager) stopCount(name string) int {
 }
 
 type mockPoolClient struct {
-	mu        sync.Mutex
-	handler   func(string, json.RawMessage)
-	connected bool
-	lastLogin *pool.LoginMessage
+	mu         sync.Mutex
+	handler    func(string, json.RawMessage)
+	reconnect  func()
+	connected  bool
+	lastLogin  *pool.LoginMessage
 	connectErr error
 	loginErr   error
 	connects   int
@@ -131,7 +135,7 @@ func (m *mockPoolClient) Connect(_ context.Context, _ string) error {
 	m.connected = true
 	return nil
 }
-func (m *mockPoolClient) Close() error                              { return nil }
+func (m *mockPoolClient) Close() error { return nil }
 func (m *mockPoolClient) SendLogin(login *pool.LoginMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -158,6 +162,11 @@ func (m *mockPoolClient) OnMessage(h func(msgType string, raw json.RawMessage)) 
 	defer m.mu.Unlock()
 	m.handler = h
 }
+func (m *mockPoolClient) OnReconnect(h func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reconnect = h
+}
 func (m *mockPoolClient) emit(v any) {
 	b, _ := json.Marshal(v)
 	var envelope struct {
@@ -169,6 +178,15 @@ func (m *mockPoolClient) emit(v any) {
 	m.mu.Unlock()
 	if h != nil {
 		h(envelope.Type, b)
+	}
+}
+
+func (m *mockPoolClient) triggerReconnect() {
+	m.mu.Lock()
+	h := m.reconnect
+	m.mu.Unlock()
+	if h != nil {
+		h()
 	}
 }
 
@@ -341,10 +359,13 @@ func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient, *mock
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	s := New(&config.Config{
-		NodeID:     "node-1",
-		WorkerName: "worker-1",
-		PoolURL:    "wss://pool.example/ws",
-		AutoUpdate: config.AutoUpdateConfig{Enabled: true},
+		NodeID:            "node-1",
+		WorkerName:        "worker-1",
+		PoolURL:           "wss://pool.example/ws",
+		HostPlatformID:    "host-1",
+		PersistentMinerID: "miner-1",
+		IdentityMode:      "stable",
+		AutoUpdate:        config.AutoUpdateConfig{Enabled: true},
 		CPUMining: config.CPUMiningConfig{
 			Enabled:           false,
 			XMRigPath:         "./bin/xmrig",
@@ -364,6 +385,18 @@ func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient, *mock
 	s.updater = &mockOTAUpdater{}
 	s.newPoller = func(_ updater.Version, _ func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
 		return &mockOTAPoller{}
+	}
+	s.scanGPUs = func() ([]telemetry.GPUDevice, error) {
+		return []telemetry.GPUDevice{{
+			DeviceID:          "0",
+			DeviceIndex:       0,
+			VendorID:          "10de",
+			UUIDSource:        "opencl_uuid_khr",
+			GPUUUID:           "abc123",
+			DeviceFingerprint: "fp01",
+			GPUModel:          "RTX",
+			PCIBusID:          "0000:01:00.0",
+		}}, nil
 	}
 	s.startDetached = detached.start
 	s.stopDetached = detached.stop
@@ -478,6 +511,79 @@ func TestSchedulerLoginCarriesVersionAndOS(t *testing.T) {
 	if login.OS == "" {
 		t.Fatalf("expected non-empty os")
 	}
+	if login.HostPlatformID != "host-1" || login.PersistentMinerID != "miner-1" || login.IdentityMode != "stable" {
+		t.Fatalf("expected stable host identity in login, got %+v", login)
+	}
+	if len(login.Devices) != 1 || login.Devices[0].GPUUUID == "" {
+		t.Fatalf("expected stable gpu devices in login, got %+v", login.Devices)
+	}
+}
+
+func TestSchedulerLoginCarriesLegacyClaimWhenMigrationPending(t *testing.T) {
+	s, _, pcl, _ := newTestScheduler()
+
+	tempDir := t.TempDir()
+	identityPath := filepath.Join(tempDir, "identity_state.json")
+	raw := []byte(`{"persistent_miner_id":"miner-1","old_worker_name":"worker-legacy","migration_completed":false}`)
+	if err := os.WriteFile(identityPath, raw, 0o600); err != nil {
+		t.Fatalf("write identity state: %v", err)
+	}
+	s.cfg.SetIdentityStatePath(identityPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+
+	waitFor(t, func() bool { return pcl.getLastLogin() != nil })
+	login := pcl.getLastLogin()
+	if login == nil || login.LegacyClaim == nil {
+		t.Fatalf("expected login legacy_claim payload")
+	}
+	if login.LegacyClaim.OldWorkerName != "worker-legacy" {
+		t.Fatalf("unexpected legacy old worker name: %q", login.LegacyClaim.OldWorkerName)
+	}
+	if login.LegacyClaim.MigrationReason != "uuid_upgrade" {
+		t.Fatalf("unexpected migration reason: %q", login.LegacyClaim.MigrationReason)
+	}
+}
+
+func TestSchedulerLoginAckMarksMigrationCompleted(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+
+	tempDir := t.TempDir()
+	identityPath := filepath.Join(tempDir, "identity_state.json")
+	raw := []byte(`{"persistent_miner_id":"miner-1","old_worker_name":"worker-legacy","migration_completed":false}`)
+	if err := os.WriteFile(identityPath, raw, 0o600); err != nil {
+		t.Fatalf("write identity state: %v", err)
+	}
+	s.cfg.SetIdentityStatePath(identityPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.LoginAckMessage{Type: "login_ack", Status: pool.PoolStatusArmed, MigrationStatus: "no_legacy_stake"})
+
+	waitFor(t, func() bool {
+		payload, err := os.ReadFile(identityPath)
+		if err != nil {
+			return false
+		}
+		var state map[string]any
+		if err := json.Unmarshal(payload, &state); err != nil {
+			return false
+		}
+		flag, ok := state["migration_completed"].(bool)
+		return ok && flag
+	})
+
+	login := s.buildLoginMessage()
+	if login.LegacyClaim != nil {
+		t.Fatalf("expected legacy_claim to stop after migration completed")
+	}
 }
 
 func TestSchedulerHandlesOTAUpdateRequired(t *testing.T) {
@@ -575,6 +681,30 @@ func TestSchedulerRunLoginFailDoesNotExitFatal(t *testing.T) {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("Run() returned error on login failure degrade path: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not exit after context cancel")
+	}
+}
+
+func TestSchedulerResendsLoginOnReconnect(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(ctx) }()
+
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+	waitFor(t, func() bool { return pcl.loginCount() >= 1 })
+
+	pcl.triggerReconnect()
+	waitFor(t, func() bool { return pcl.loginCount() >= 2 })
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() returned unexpected error: %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run() did not exit after context cancel")

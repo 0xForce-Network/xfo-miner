@@ -13,8 +13,10 @@ import (
 
 	"github.com/0xforce/xfo-miner/internal/config"
 	"github.com/0xforce/xfo-miner/internal/env"
+	"github.com/0xforce/xfo-miner/internal/identity"
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
+	"github.com/0xforce/xfo-miner/internal/telemetry"
 	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
@@ -67,6 +69,8 @@ type Scheduler struct {
 	newPoller       func(currentVer updater.Version, onUpdate func(context.Context, *pool.OTAUpdateMessage) error) otaPoller
 	messageCh       chan inboundMessage
 	idleMinerPid    int
+	loginDevices    []pool.GPUIdentity
+	scanGPUs        func() ([]telemetry.GPUDevice, error)
 	startDetached   func(command string, args []string) (*process.DetachedProcess, error)
 	stopDetached    func(pid int, gracePeriod int) error
 	isDetachedAlive func(pid int) bool
@@ -86,6 +90,7 @@ func New(cfg *config.Config, version string, capabilities *env.SystemCapabilitie
 		logger:          logger,
 		state:           StateStandby,
 		messageCh:       make(chan inboundMessage, 64),
+		scanGPUs:        telemetry.ScanGPUs,
 		startDetached:   process.StartDetached,
 		stopDetached:    process.StopDetached,
 		isDetachedAlive: process.IsProcessRunning,
@@ -123,28 +128,21 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			s.logger.Warn("dropping pool message due to full queue", "type", msgType)
 		}
 	})
+	s.poolClient.OnReconnect(func() {
+		s.logger.Info("L2 pool reconnected, re-sending login")
+		if err := s.poolClient.SendLogin(s.buildLoginMessage()); err != nil {
+			s.logger.Warn("failed to re-send login after reconnection", "error", err)
+			return
+		}
+		s.logger.Info("login re-sent successfully after reconnection")
+	})
 
-	login := &pool.LoginMessage{
-		Type:          "login",
-		NodeID:        s.cfg.NodeID,
-		WalletAddress: s.cfg.WalletAddress,
-		WorkerName:    s.cfg.WorkerName,
-		Version:       s.version,
-		OS:            runtime.GOOS + "-" + runtime.GOARCH,
-		Capabilities: &pool.CapabilitiesData{
-			HasGPU:         s.capabilities.HasGPU,
-			GPUCount:       len(s.capabilities.GPUs),
-			HasHashcat:     s.capabilities.HasHashcat,
-			HashcatVersion: s.capabilities.HashcatVersion,
-			HasXMRig:       s.capabilities.HasXMRig,
-			XMRigVersion:   s.capabilities.XMRigVersion,
-			HasDocker:      s.capabilities.HasDocker,
-			AIReady:        s.capabilities.AIReady,
-			BenchmarkKHs:   s.capabilities.BenchmarkKHs,
-			RunMode:        s.capabilities.RunMode,
-		},
-	}
+	login := s.buildLoginMessage()
 	if s.cfg.L2Enabled() {
+		if err := s.prepareLoginDevices(); err != nil {
+			return err
+		}
+		login = s.buildLoginMessage()
 		if err := s.poolClient.Connect(ctx, s.cfg.PoolURL); err != nil {
 			s.logger.Warn("L2 pool WebSocket connect failed — degrading to L1-only mode", "pool_url", s.cfg.PoolURL, "error", err)
 		} else if err := s.poolClient.SendLogin(login); err != nil {
@@ -177,6 +175,67 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			s.handleMessage(ctx, msg)
 		}
 	}
+}
+
+func (s *Scheduler) buildLoginMessage() *pool.LoginMessage {
+	login := &pool.LoginMessage{
+		Type:              "login",
+		NodeID:            s.cfg.NodeID,
+		WalletAddress:     s.cfg.WalletAddress,
+		WorkerName:        s.cfg.WorkerName,
+		HostPlatformID:    s.cfg.HostPlatformID,
+		PersistentMinerID: s.cfg.PersistentMinerID,
+		IdentityMode:      s.cfg.IdentityMode,
+		Devices:           s.loginDevices,
+		Version:           s.version,
+		OS:                runtime.GOOS + "-" + runtime.GOARCH,
+		Capabilities: &pool.CapabilitiesData{
+			HasGPU:         s.capabilities.HasGPU,
+			GPUCount:       len(s.capabilities.GPUs),
+			HasHashcat:     s.capabilities.HasHashcat,
+			HashcatVersion: s.capabilities.HashcatVersion,
+			HasXMRig:       s.capabilities.HasXMRig,
+			XMRigVersion:   s.capabilities.XMRigVersion,
+			HasDocker:      s.capabilities.HasDocker,
+			AIReady:        s.capabilities.AIReady,
+			BenchmarkKHs:   s.capabilities.BenchmarkKHs,
+			RunMode:        s.capabilities.RunMode,
+		},
+	}
+
+	if needsMigration, oldWorkerName, err := identity.NeedsMigrationClaim(s.cfg.IdentityStatePath()); err != nil {
+		s.logger.Warn("failed to evaluate legacy_claim migration state", "error", err)
+	} else if needsMigration {
+		login.LegacyClaim = &pool.LegacyClaim{
+			OldWorkerName:  oldWorkerName,
+			MigrationReason: "uuid_upgrade",
+		}
+	}
+
+	return login
+}
+
+func (s *Scheduler) prepareLoginDevices() error {
+	devices, err := s.scanGPUs()
+	if err != nil {
+		return fmt.Errorf("prepare stable gpu identity: %w", err)
+	}
+
+	identities := make([]pool.GPUIdentity, 0, len(devices))
+	for _, d := range devices {
+		identities = append(identities, pool.GPUIdentity{
+			DeviceIndex:       d.DeviceIndex,
+			VendorID:          d.VendorID,
+			DeviceID:          d.DeviceID,
+			UUIDSource:        d.UUIDSource,
+			GPUUUID:           d.GPUUUID,
+			DeviceFingerprint: d.DeviceFingerprint,
+			PCIBusID:          d.PCIBusID,
+			GPUModel:          d.GPUModel,
+		})
+	}
+	s.loginDevices = identities
+	return nil
 }
 
 func (s *Scheduler) startOTAPoller(ctx context.Context) {
@@ -295,6 +354,7 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 			s.logger.Warn("invalid login_ack message", "error", err)
 			return
 		}
+		s.handleLoginAck(&ack)
 		s.handlePoolStatus(ctx, ack.Status)
 	case "update_required":
 		var ota pool.OTAUpdateMessage
@@ -303,6 +363,31 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 			return
 		}
 		s.handleOTAUpdate(ctx, &ota)
+	}
+}
+
+func (s *Scheduler) handleLoginAck(ack *pool.LoginAckMessage) {
+	if ack == nil {
+		return
+	}
+
+	identityPath := s.cfg.IdentityStatePath()
+	if strings.TrimSpace(identityPath) == "" {
+		return
+	}
+
+	if (ack.MigrationStatus == "completed" && ack.StakeRecovered) || ack.MigrationStatus == "no_legacy_stake" {
+		if err := identity.MarkMigrationCompleted(identityPath); err != nil {
+			s.logger.Warn("failed to persist migration_completed flag", "error", err)
+			return
+		}
+
+		if ack.MigrationStatus == "completed" {
+			s.logger.Info("[L2] Stake migration completed successfully — old worker_name stake recovered")
+			return
+		}
+
+		s.logger.Info("[L2] No legacy stake found for old worker_name — migration marked done")
 	}
 }
 

@@ -194,6 +194,112 @@ func TestXMRigManagerUsesHTTPAPIForThreadSwitch(t *testing.T) {
 	}
 }
 
+func TestXMRigManagerRetriesHTTPAPIBeforeSuccess(t *testing.T) {
+	t.Parallel()
+
+	proc := newMockProcessManager()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var (
+		putCalls int
+		callsMu  sync.Mutex
+	)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/2/config" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		callsMu.Lock()
+		defer callsMu.Unlock()
+		putCalls++
+		if putCalls < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer api.Close()
+
+	mgr := NewXMRigManager(proc, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+	}, "stratum+tcp://pool.example:3333", testWalletAddress, "node-1", "worker-1", logger)
+	mgr.apiBaseURL = api.URL
+	mgr.httpClient = api.Client()
+
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := mgr.SetHeartbeatMode(context.Background()); err != nil {
+		t.Fatalf("SetHeartbeatMode() error = %v", err)
+	}
+
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if putCalls != 3 {
+		t.Fatalf("expected 3 HTTP API attempts, got %d", putCalls)
+	}
+	if got := proc.startCount(xmrigProcessName); got != 1 {
+		t.Fatalf("expected no restart when retry succeeds, starts=%d", got)
+	}
+	if got := proc.stopCount(xmrigProcessName); got != 0 {
+		t.Fatalf("expected no stop when retry succeeds, stops=%d", got)
+	}
+}
+
+func TestXMRigManagerFallsBackToRestartAfterHTTPAPIRetriesExhausted(t *testing.T) {
+	t.Parallel()
+
+	proc := newMockProcessManager()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var (
+		putCalls int
+		callsMu  sync.Mutex
+	)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && r.URL.Path == "/2/config" {
+			callsMu.Lock()
+			putCalls++
+			callsMu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer api.Close()
+
+	mgr := NewXMRigManager(proc, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+	}, "stratum+tcp://pool.example:3333", testWalletAddress, "node-1", "worker-1", logger)
+	mgr.apiBaseURL = api.URL
+	mgr.httpClient = api.Client()
+
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := mgr.SetHeartbeatMode(context.Background()); err != nil {
+		t.Fatalf("SetHeartbeatMode() error = %v", err)
+	}
+
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if putCalls != 3 {
+		t.Fatalf("expected 3 HTTP API attempts before fallback, got %d", putCalls)
+	}
+	if got := proc.startCount(xmrigProcessName); got != 2 {
+		t.Fatalf("expected fallback restart to start process again, starts=%d", got)
+	}
+	if got := proc.stopCount(xmrigProcessName); got != 1 {
+		t.Fatalf("expected fallback restart to stop process once, stops=%d", got)
+	}
+}
+
 type flakyProcessManager struct {
 	mu       sync.Mutex
 	running  bool
@@ -240,17 +346,74 @@ func TestXMRigManagerWatchdogRetriesRestart(t *testing.T) {
 		BackgroundThreads: 1,
 	}, "stratum+tcp://pool.example:3333", testWalletAddress, "node-1", "worker-1", logger)
 	mgr.currentMode = xmrigModeFull
+	mgr.generation = 1
 	mgr.watchdogInitialBackoff = 10 * time.Millisecond
 	mgr.watchdogMaxBackoff = 20 * time.Millisecond
 
 	done := make(chan struct{})
-	go mgr.watchProcessExit(done)
+	go mgr.watchProcessExit(done, 1)
 	close(done)
 
 	waitFor(t, func() bool {
 		pm.mu.Lock()
 		defer pm.mu.Unlock()
 		return pm.starts >= 2
+	})
+}
+
+func TestXMRigWatchdogIgnoresStaleExit(t *testing.T) {
+	t.Parallel()
+
+	pm := &flakyProcessManager{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewXMRigManager(pm, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+	}, "stratum+tcp://pool.example:3333", testWalletAddress, "node-1", "worker-1", logger)
+	mgr.currentMode = xmrigModeHeartbeat
+	mgr.generation = 2
+	mgr.watchdogInitialBackoff = 10 * time.Millisecond
+	mgr.watchdogMaxBackoff = 20 * time.Millisecond
+
+	done := make(chan struct{})
+	go mgr.watchProcessExit(done, 1)
+	close(done)
+
+	time.Sleep(40 * time.Millisecond)
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.starts != 0 {
+		t.Fatalf("expected stale watchdog exit to be ignored, starts=%d", pm.starts)
+	}
+}
+
+func TestXMRigWatchdogRestartsCurrentGenOnly(t *testing.T) {
+	t.Parallel()
+
+	pm := &flakyProcessManager{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewXMRigManager(pm, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+	}, "stratum+tcp://pool.example:3333", testWalletAddress, "node-1", "worker-1", logger)
+	mgr.currentMode = xmrigModeHeartbeat
+	mgr.generation = 3
+	mgr.watchdogInitialBackoff = 10 * time.Millisecond
+	mgr.watchdogMaxBackoff = 20 * time.Millisecond
+
+	done := make(chan struct{})
+	go mgr.watchProcessExit(done, 3)
+	close(done)
+
+	waitFor(t, func() bool {
+		pm.mu.Lock()
+		defer pm.mu.Unlock()
+		return pm.starts >= 1
 	})
 }
 

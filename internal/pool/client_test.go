@@ -223,6 +223,69 @@ func TestReconnectOnDisconnect(t *testing.T) {
 	}
 }
 
+func TestReconnectCallbackTriggeredAfterReconnect(t *testing.T) {
+	t.Parallel()
+
+	upgrader := websocket.Upgrader{}
+	connections := int32(0)
+	reconnected := make(chan struct{}, 1)
+	messages := make(chan string, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		count := atomic.AddInt32(&connections, 1)
+		if count == 1 {
+			_ = conn.Close()
+			return
+		}
+
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		messages <- string(payload)
+	}))
+	defer server.Close()
+
+	client := NewWSSClient(testLogger(), WithHeartbeatInterval(time.Hour), WithPingInterval(time.Hour), WithReconnect(20*time.Millisecond, 100*time.Millisecond))
+	defer client.Close()
+
+	client.OnReconnect(func() {
+		select {
+		case reconnected <- struct{}{}:
+		default:
+		}
+	})
+
+	if err := client.Connect(context.Background(), wsURL(server.URL)); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+
+	select {
+	case <-reconnected:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting reconnect callback")
+	}
+
+	if err := client.SendHeartbeat(); err != nil {
+		t.Fatalf("SendHeartbeat() error = %v", err)
+	}
+
+	select {
+	case <-messages:
+		if atomic.LoadInt32(&connections) < 2 {
+			t.Fatalf("expected reconnect, connections=%d", connections)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting post-reconnect message")
+	}
+}
+
 func TestGracefulClose(t *testing.T) {
 	t.Parallel()
 

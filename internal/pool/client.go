@@ -25,6 +25,7 @@ type Client interface {
 	SendTelemetryL1(msg *TelemetryL1Message) error
 	SendTelemetryL2(msg *TelemetryL2Message) error
 	OnMessage(handler func(msgType string, raw json.RawMessage))
+	OnReconnect(handler func())
 }
 
 type WSSClient struct {
@@ -39,6 +40,7 @@ type WSSClient struct {
 	mu        sync.RWMutex
 	conn      *websocket.Conn
 	callback  func(msgType string, raw json.RawMessage)
+	reconnectCallback func()
 	sendQueue chan []byte
 
 	closeOnce sync.Once
@@ -185,7 +187,11 @@ func (c *WSSClient) reconnect(ctx context.Context, url string, initialBackoff ti
 		if err == nil {
 			c.mu.Lock()
 			c.conn = nextConn
+			reconnectCallback := c.reconnectCallback
 			c.mu.Unlock()
+			if reconnectCallback != nil {
+				go reconnectCallback()
+			}
 			return nextConn, nil
 		}
 
@@ -366,6 +372,12 @@ func (c *WSSClient) getCallback() func(msgType string, raw json.RawMessage) {
 	return c.callback
 }
 
+func (c *WSSClient) OnReconnect(handler func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reconnectCallback = handler
+}
+
 func (c *WSSClient) isClosed() bool {
 	select {
 	case <-c.closeCh:
@@ -444,3 +456,5 @@ func (c *NoopClient) SendTelemetryL2(_ *TelemetryL2Message) error {
 }
 
 func (c *NoopClient) OnMessage(_ func(msgType string, raw json.RawMessage)) {}
+
+func (c *NoopClient) OnReconnect(_ func()) {}
