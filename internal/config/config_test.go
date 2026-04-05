@@ -1,9 +1,11 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -632,6 +634,9 @@ func TestLoadConfigStableIdentityGeneratedAndPersisted(t *testing.T) {
 	if first.PersistentMinerID == "" || first.HostPlatformID == "" {
 		t.Fatalf("expected generated stable identities, got persistent=%q host=%q", first.PersistentMinerID, first.HostPlatformID)
 	}
+	if first.HostPlatformSource == "" {
+		t.Fatalf("expected generated host_platform_source to be non-empty")
+	}
 
 	second, err := LoadConfig(path)
 	if err != nil {
@@ -639,6 +644,9 @@ func TestLoadConfigStableIdentityGeneratedAndPersisted(t *testing.T) {
 	}
 	if first.PersistentMinerID != second.PersistentMinerID || first.HostPlatformID != second.HostPlatformID {
 		t.Fatalf("expected persisted identities, first=(%s,%s) second=(%s,%s)", first.PersistentMinerID, first.HostPlatformID, second.PersistentMinerID, second.HostPlatformID)
+	}
+	if first.HostPlatformSource != second.HostPlatformSource {
+		t.Fatalf("expected persisted host_platform_source, first=%s second=%s", first.HostPlatformSource, second.HostPlatformSource)
 	}
 
 	raw, err := os.ReadFile(first.IdentityStatePath())
@@ -657,5 +665,32 @@ func TestLoadConfigStableIdentityGeneratedAndPersisted(t *testing.T) {
 	}
 	if state.MigrationCompleted {
 		t.Fatalf("expected migration_completed=false by default")
+	}
+}
+
+func TestDetectHostPlatformIDWindowsMachineGUID(t *testing.T) {
+	t.Parallel()
+
+	origGOOS := hostPlatformGOOS
+	origExec := hostPlatformExecCommandContext
+	defer func() {
+		hostPlatformGOOS = origGOOS
+		hostPlatformExecCommandContext = origExec
+	}()
+
+	hostPlatformGOOS = "windows"
+	hostPlatformExecCommandContext = func(_ context.Context, name string, _ ...string) *exec.Cmd {
+		if name == "reg" {
+			return exec.Command("/bin/sh", "-c", "cat <<'EOF'\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography\n    MachineGuid    REG_SZ    D1B90E6C-5B11-4A2F-ACF0-5EDB745EA4BB\nEOF")
+		}
+		return exec.Command("/bin/sh", "-c", "exit 1")
+	}
+
+	id, source := detectHostPlatformID()
+	if id == "" {
+		t.Fatalf("expected windows machine guid based host platform id")
+	}
+	if source != "windows_machine_guid" {
+		t.Fatalf("expected source windows_machine_guid, got %q", source)
 	}
 }

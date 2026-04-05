@@ -3,10 +3,13 @@ package telemetry
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +17,7 @@ import (
 
 var execCommandContext = exec.CommandContext
 var lookPath = exec.LookPath
+var currentGOOS = runtime.GOOS
 
 type GPUDevice struct {
 	DeviceID          string  `json:"device_id"`
@@ -41,12 +45,12 @@ type openCLIdentity struct {
 }
 
 func ScanGPUs() ([]GPUDevice, error) {
-	identities, err := detectOpenCLIdentities()
+	identities, uuidSource, err := detectGPUIdentities()
 	if err != nil {
 		return nil, err
 	}
 	if len(identities) == 0 {
-		return nil, errors.New("OpenCL runtime not detected. L2 mode requires OpenCL with CL_DEVICE_UUID_KHR support.")
+		return nil, errors.New("gpu_identity_not_supported_on_platform: no compatible GPU identity source available for L2 mode")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -62,7 +66,7 @@ func ScanGPUs() ([]GPUDevice, error) {
 					DeviceID:          strconv.Itoa(identity.DeviceIndex),
 					DeviceIndex:       identity.DeviceIndex,
 					VendorID:          identity.VendorID,
-					UUIDSource:        "opencl_uuid_khr",
+					UUIDSource:        uuidSource,
 					GPUUUID:           identity.GPUUUID,
 					DeviceFingerprint: buildDeviceFingerprint(identity.VendorID, identity.DeviceID, identity.PCIBusID, identity.GPUUUID, identity.DeviceName),
 					GPUModel:          identity.DeviceName,
@@ -102,14 +106,14 @@ func ScanGPUs() ([]GPUDevice, error) {
 		idxInt, _ := strconv.Atoi(idx)
 		identity, ok := identityByIndex[idxInt]
 		if !ok || strings.TrimSpace(identity.GPUUUID) == "" {
-			return nil, fmt.Errorf("OpenCL runtime not detected. L2 mode requires OpenCL with CL_DEVICE_UUID_KHR support. missing UUID for gpu index=%d", idxInt)
+			return nil, fmt.Errorf("partial_gpu_identity_detected: missing stable gpu identity for index=%d source=%s", idxInt, uuidSource)
 		}
 
 		devices = append(devices, GPUDevice{
 			DeviceID:          idx,
 			DeviceIndex:       idxInt,
 			VendorID:          identity.VendorID,
-			UUIDSource:        "opencl_uuid_khr",
+			UUIDSource:        uuidSource,
 			GPUUUID:           identity.GPUUUID,
 			DeviceFingerprint: buildDeviceFingerprint(identity.VendorID, identity.DeviceID, strings.TrimSpace(parts[3]), identity.GPUUUID, name),
 			GPUModel:          name,
@@ -123,6 +127,36 @@ func ScanGPUs() ([]GPUDevice, error) {
 	}
 
 	return devices, nil
+}
+
+func detectGPUIdentities() ([]openCLIdentity, string, error) {
+	if identities, err := detectOpenCLIdentities(); err == nil && len(identities) > 0 {
+		source := "opencl_uuid_khr"
+		if currentGOOS == "windows" {
+			source = "windows_opencl_uuid_khr"
+		} else if currentGOOS == "darwin" {
+			source = "mac_opencl_uuid_khr"
+		}
+		return identities, source, nil
+	}
+
+	if currentGOOS == "windows" {
+		identities, err := detectWindowsPNPIdentities()
+		if err != nil {
+			return nil, "", fmt.Errorf("gpu_identity_not_supported_on_platform: Windows GPU identity probe failed (opencl_unavailable, platform_uuid_probe_failed): %w", err)
+		}
+		return identities, "windows_pnp_device_id", nil
+	}
+
+	if currentGOOS == "darwin" {
+		identities, err := detectMacPCIIdentities()
+		if err != nil {
+			return nil, "", fmt.Errorf("gpu_identity_not_supported_on_platform: macOS GPU identity probe failed (opencl_unavailable, platform_uuid_probe_failed): %w", err)
+		}
+		return identities, "mac_pci_fingerprint", nil
+	}
+
+	return nil, "", errors.New("opencl_unavailable: OpenCL runtime not detected. Linux L2 mode requires OpenCL with CL_DEVICE_UUID_KHR support")
 }
 
 func detectOpenCLIdentities() ([]openCLIdentity, error) {
@@ -197,6 +231,134 @@ func detectOpenCLIdentities() ([]openCLIdentity, error) {
 	return identities, nil
 }
 
+func detectWindowsPNPIdentities() ([]openCLIdentity, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := execCommandContext(ctx, "powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_VideoController | Select-Object PNPDeviceID,AdapterCompatibility,Name | ConvertTo-Csv -NoTypeInformation")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("windows_pnp_probe_failed: %w", err)
+	}
+
+	reader := csv.NewReader(strings.NewReader(string(out)))
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("windows_pnp_csv_parse_failed: %w", err)
+	}
+	if len(records) <= 1 {
+		return nil, errors.New("windows_pnp_no_devices")
+	}
+
+	headers := make(map[string]int)
+	for i, h := range records[0] {
+		headers[strings.ToLower(strings.TrimSpace(h))] = i
+	}
+	idxPNP, okPNP := headers["pnpdeviceid"]
+	idxVendor, okVendor := headers["adaptercompatibility"]
+	idxName, okName := headers["name"]
+	if !okPNP || !okVendor || !okName {
+		return nil, errors.New("windows_pnp_missing_required_columns")
+	}
+
+	identities := make([]openCLIdentity, 0, len(records)-1)
+	for rowIdx, row := range records[1:] {
+		if idxPNP >= len(row) || idxName >= len(row) {
+			continue
+		}
+		pnp := strings.TrimSpace(row[idxPNP])
+		name := strings.TrimSpace(row[idxName])
+		if pnp == "" || name == "" {
+			continue
+		}
+		vendor := ""
+		if idxVendor < len(row) {
+			vendor = strings.TrimSpace(row[idxVendor])
+		}
+
+		parsedVendorID, parsedDeviceID := parsePNPIDs(pnp)
+		vendorFallbackID := parseLikelyHexID(vendor, 4)
+		identities = append(identities, openCLIdentity{
+			DeviceIndex: rowIdx,
+			DeviceName:  name,
+			GPUUUID:     makeCompatibilityGPUUUID("windows_pnp_device_id", pnp, name, vendor),
+			VendorID:    firstNonEmpty(parsedVendorID, vendorFallbackID),
+			DeviceID:    parsedDeviceID,
+			PCIBusID:    pnp,
+		})
+	}
+
+	if len(identities) == 0 {
+		return nil, errors.New("windows_pnp_no_usable_gpu_identity")
+	}
+
+	return identities, nil
+}
+
+func detectMacPCIIdentities() ([]openCLIdentity, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	cmd := execCommandContext(ctx, "system_profiler", "SPDisplaysDataType", "-json")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("mac_system_profiler_probe_failed: %w", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return nil, fmt.Errorf("mac_system_profiler_json_parse_failed: %w", err)
+	}
+
+	itemsRaw, ok := payload["SPDisplaysDataType"]
+	if !ok {
+		return nil, errors.New("mac_system_profiler_missing_spdisplays")
+	}
+	items, ok := itemsRaw.([]any)
+	if !ok || len(items) == 0 {
+		return nil, errors.New("mac_system_profiler_no_devices")
+	}
+
+	identities := make([]openCLIdentity, 0, len(items))
+	for idx, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := firstNonEmpty(asString(obj["sppci_model"]), asString(obj["_name"]))
+		vendorRaw := asString(obj["spdisplays_vendor"])
+		vendorIDRaw := asString(obj["spdisplays_vendor-id"])
+		deviceRaw := asString(obj["spdisplays_device-id"])
+		bus := asString(obj["spdisplays_bus"])
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+
+		vendorID := parseLikelyHexID(vendorIDRaw, 4)
+		if vendorID == "" {
+			vendorID = parseLikelyHexID(vendorRaw, 4)
+		}
+		deviceID := parseLikelyHexID(deviceRaw, 4)
+		seedBus := firstNonEmpty(bus, asString(obj["spdisplays_pcie_device_type"]))
+		compatUUID := makeCompatibilityGPUUUID("mac_pci_fingerprint", name, vendorRaw, deviceRaw, seedBus)
+
+		identities = append(identities, openCLIdentity{
+			DeviceIndex: idx,
+			DeviceName:  name,
+			GPUUUID:     compatUUID,
+			VendorID:    vendorID,
+			DeviceID:    deviceID,
+			PCIBusID:    seedBus,
+		})
+	}
+
+	if len(identities) == 0 {
+		return nil, errors.New("mac_system_profiler_no_usable_gpu_identity")
+	}
+
+	return identities, nil
+}
+
 func extractValue(line string) string {
 	if idx := strings.Index(line, ":"); idx >= 0 {
 		return strings.TrimSpace(line[idx+1:])
@@ -228,4 +390,91 @@ func buildDeviceFingerprint(vendorID, deviceID, pciBusID, gpuUUID, gpuModel stri
 		strings.ToLower(strings.TrimSpace(gpuModel))
 	sum := sha256.Sum256([]byte(seed))
 	return hex.EncodeToString(sum[:16])
+}
+
+func makeCompatibilityGPUUUID(source string, parts ...string) string {
+	seedParts := []string{strings.ToLower(strings.TrimSpace(source))}
+	for _, p := range parts {
+		seedParts = append(seedParts, strings.ToLower(strings.TrimSpace(p)))
+	}
+	seed := strings.Join(seedParts, ":")
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:16])
+}
+
+func parsePNPIDs(value string) (string, string) {
+	v := strings.ToUpper(strings.TrimSpace(value))
+	vendorID := extractHexTokenAfterMarker(v, "VEN_", 4)
+	deviceID := extractHexTokenAfterMarker(v, "DEV_", 4)
+	return vendorID, deviceID
+}
+
+func extractHexTokenAfterMarker(value, marker string, minLen int) string {
+	idx := strings.Index(value, marker)
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(marker)
+	end := start
+	for end < len(value) {
+		c := value[end]
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) {
+			break
+		}
+		end++
+	}
+	if end-start < minLen {
+		return ""
+	}
+	return strings.ToLower(value[start:end])
+}
+
+func parseLikelyHexID(value string, minLen int) string {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return ""
+	}
+
+	normalized := normalizeHexString(v)
+	if len(normalized) < minLen {
+		return ""
+	}
+
+	hasDigit := false
+	for i := 0; i < len(normalized); i++ {
+		if normalized[i] >= '0' && normalized[i] <= '9' {
+			hasDigit = true
+			break
+		}
+	}
+	if !hasDigit {
+		return ""
+	}
+
+	if strings.Contains(v, "0x") || strings.Contains(v, "0X") {
+		if idx := strings.Index(strings.ToLower(v), "0x"); idx >= 0 {
+			if token := extractHexTokenAfterMarker(strings.ToUpper(v[idx:]), "0X", minLen); token != "" {
+				return token
+			}
+		}
+	}
+
+	return normalized
+}
+
+func asString(v any) string {
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

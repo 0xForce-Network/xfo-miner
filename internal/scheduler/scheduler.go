@@ -179,16 +179,17 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 func (s *Scheduler) buildLoginMessage() *pool.LoginMessage {
 	login := &pool.LoginMessage{
-		Type:              "login",
-		NodeID:            s.cfg.NodeID,
-		WalletAddress:     s.cfg.WalletAddress,
-		WorkerName:        s.cfg.WorkerName,
-		HostPlatformID:    s.cfg.HostPlatformID,
-		PersistentMinerID: s.cfg.PersistentMinerID,
-		IdentityMode:      s.cfg.IdentityMode,
-		Devices:           s.loginDevices,
-		Version:           s.version,
-		OS:                runtime.GOOS + "-" + runtime.GOARCH,
+		Type:               "login",
+		NodeID:             s.cfg.NodeID,
+		WalletAddress:      s.cfg.WalletAddress,
+		WorkerName:         s.cfg.WorkerName,
+		HostPlatformID:     s.cfg.HostPlatformID,
+		HostPlatformSource: s.cfg.HostPlatformSource,
+		PersistentMinerID:  s.cfg.PersistentMinerID,
+		IdentityMode:       s.cfg.IdentityMode,
+		Devices:            s.loginDevices,
+		Version:            s.version,
+		OS:                 runtime.GOOS + "-" + runtime.GOARCH,
 		Capabilities: &pool.CapabilitiesData{
 			HasGPU:         s.capabilities.HasGPU,
 			GPUCount:       len(s.capabilities.GPUs),
@@ -207,7 +208,7 @@ func (s *Scheduler) buildLoginMessage() *pool.LoginMessage {
 		s.logger.Warn("failed to evaluate legacy_claim migration state", "error", err)
 	} else if needsMigration {
 		login.LegacyClaim = &pool.LegacyClaim{
-			OldWorkerName:  oldWorkerName,
+			OldWorkerName:   oldWorkerName,
 			MigrationReason: "uuid_upgrade",
 		}
 	}

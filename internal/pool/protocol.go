@@ -23,22 +23,23 @@ type CapabilitiesData struct {
 
 // Miner -> Pool
 type LoginMessage struct {
-	Type              string            `json:"type"`
-	NodeID            string            `json:"node_id"`
-	WalletAddress     string            `json:"wallet_address"`
-	WorkerName        string            `json:"worker_name"`
-	LegacyClaim       *LegacyClaim      `json:"legacy_claim,omitempty"`
-	HostPlatformID    string            `json:"host_platform_id,omitempty"`
-	PersistentMinerID string            `json:"persistent_miner_id,omitempty"`
-	IdentityMode      string            `json:"identity_mode,omitempty"`
-	Devices           []GPUIdentity     `json:"devices,omitempty"`
-	Version           string            `json:"version"`
-	OS                string            `json:"os"`
-	Capabilities      *CapabilitiesData `json:"capabilities"`
+	Type               string            `json:"type"`
+	NodeID             string            `json:"node_id"`
+	WalletAddress      string            `json:"wallet_address"`
+	WorkerName         string            `json:"worker_name"`
+	LegacyClaim        *LegacyClaim      `json:"legacy_claim,omitempty"`
+	HostPlatformID     string            `json:"host_platform_id,omitempty"`
+	HostPlatformSource string            `json:"host_platform_source,omitempty"`
+	PersistentMinerID  string            `json:"persistent_miner_id,omitempty"`
+	IdentityMode       string            `json:"identity_mode,omitempty"`
+	Devices            []GPUIdentity     `json:"devices,omitempty"`
+	Version            string            `json:"version"`
+	OS                 string            `json:"os"`
+	Capabilities       *CapabilitiesData `json:"capabilities"`
 }
 
 type LegacyClaim struct {
-	OldWorkerName  string `json:"old_worker_name"`
+	OldWorkerName   string `json:"old_worker_name"`
 	MigrationReason string `json:"migration_reason"`
 }
 

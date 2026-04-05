@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,34 +11,41 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Config maps specs §4 config.json.
 type Config struct {
-	NodeID            string           `json:"node_id"`
-	WalletAddress     string           `json:"wallet_address"`
-	WorkerName        string           `json:"worker_name"`
-	HostPlatformID    string           `json:"host_platform_id,omitempty"`
-	PersistentMinerID string           `json:"persistent_miner_id,omitempty"`
-	PoolURL           string           `json:"pool_url"`
-	HashcatPath       string           `json:"hashcat_path"`
-	MaxCPUThreads     int              `json:"max_cpu_threads"`
-	AutoUpdate        AutoUpdateConfig `json:"auto_update"`
-	IdleBehavior      IdleBehavior     `json:"idle_behavior"`
-	CPUMining         CPUMiningConfig  `json:"cpu_mining"`
-	IdentityMode      string           `json:"identity_mode,omitempty"`
-	identityStatePath string           `json:"-"`
+	NodeID             string           `json:"node_id"`
+	WalletAddress      string           `json:"wallet_address"`
+	WorkerName         string           `json:"worker_name"`
+	HostPlatformID     string           `json:"host_platform_id,omitempty"`
+	HostPlatformSource string           `json:"host_platform_source,omitempty"`
+	PersistentMinerID  string           `json:"persistent_miner_id,omitempty"`
+	PoolURL            string           `json:"pool_url"`
+	HashcatPath        string           `json:"hashcat_path"`
+	MaxCPUThreads      int              `json:"max_cpu_threads"`
+	AutoUpdate         AutoUpdateConfig `json:"auto_update"`
+	IdleBehavior       IdleBehavior     `json:"idle_behavior"`
+	CPUMining          CPUMiningConfig  `json:"cpu_mining"`
+	IdentityMode       string           `json:"identity_mode,omitempty"`
+	identityStatePath  string           `json:"-"`
 }
 
 type identityState struct {
-	HostPlatformID    string `json:"host_platform_id"`
-	PersistentMinerID string `json:"persistent_miner_id"`
-	OldWorkerName     string `json:"old_worker_name,omitempty"`
-	MigrationCompleted bool  `json:"migration_completed"`
+	HostPlatformID     string `json:"host_platform_id"`
+	HostPlatformSource string `json:"host_platform_source,omitempty"`
+	PersistentMinerID  string `json:"persistent_miner_id"`
+	OldWorkerName      string `json:"old_worker_name,omitempty"`
+	MigrationCompleted bool   `json:"migration_completed"`
 }
+
+var hostPlatformExecCommandContext = exec.CommandContext
+var hostPlatformGOOS = runtime.GOOS
 
 type AutoUpdateConfig struct {
 	Enabled         bool   `json:"enabled"`
@@ -135,6 +143,9 @@ func (c *Config) ensureStableIdentity(configPath string) error {
 	if strings.TrimSpace(c.HostPlatformID) == "" {
 		c.HostPlatformID = strings.TrimSpace(state.HostPlatformID)
 	}
+	if strings.TrimSpace(c.HostPlatformSource) == "" {
+		c.HostPlatformSource = strings.TrimSpace(state.HostPlatformSource)
+	}
 
 	if strings.TrimSpace(c.PersistentMinerID) == "" {
 		id, err := newRandomID()
@@ -144,20 +155,21 @@ func (c *Config) ensureStableIdentity(configPath string) error {
 		c.PersistentMinerID = id
 	}
 	if strings.TrimSpace(c.HostPlatformID) == "" {
-		c.HostPlatformID = detectHostPlatformID()
+		c.HostPlatformID, c.HostPlatformSource = detectHostPlatformID()
 	}
 
 	if strings.TrimSpace(state.OldWorkerName) == "" {
 		state.OldWorkerName = strings.TrimSpace(c.WorkerName)
 	}
 
-	if strings.TrimSpace(c.HostPlatformID) == "" {
+	if strings.TrimSpace(c.HostPlatformID) == "" || c.HostPlatformSource == "hostname_hash_degraded" {
 		c.IdentityMode = "legacy_host"
 	} else {
 		c.IdentityMode = "stable"
 	}
 
 	state.HostPlatformID = c.HostPlatformID
+	state.HostPlatformSource = c.HostPlatformSource
 	state.PersistentMinerID = c.PersistentMinerID
 	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -170,7 +182,37 @@ func (c *Config) ensureStableIdentity(configPath string) error {
 	return nil
 }
 
-func detectHostPlatformID() string {
+func detectHostPlatformID() (string, string) {
+	if hostPlatformGOOS == "linux" {
+		if id := detectLinuxMachineID(); id != "" {
+			return id, "linux_machine_id"
+		}
+	}
+
+	if hostPlatformGOOS == "windows" {
+		if id := detectWindowsMachineGUID(); id != "" {
+			return id, "windows_machine_guid"
+		}
+	}
+
+	if hostPlatformGOOS == "darwin" {
+		if id := detectMacPlatformUUID(); id != "" {
+			return id, "mac_platform_uuid"
+		}
+	}
+
+	hostname, err := os.Hostname()
+	if err == nil {
+		hostname = strings.TrimSpace(strings.ToLower(hostname))
+		if hostname != "" {
+			return hostStableHash(hostname), "hostname_hash_degraded"
+		}
+	}
+
+	return "", ""
+}
+
+func detectLinuxMachineID() string {
 	candidates := []string{"/etc/machine-id", "/var/lib/dbus/machine-id"}
 	for _, p := range candidates {
 		raw, err := os.ReadFile(p)
@@ -179,21 +221,89 @@ func detectHostPlatformID() string {
 		}
 		value := strings.ToLower(strings.TrimSpace(string(raw)))
 		if value != "" {
-			sum := sha256.Sum256([]byte(value))
-			return hex.EncodeToString(sum[:16])
+			return hostStableHash(value)
 		}
 	}
-
-	hostname, err := os.Hostname()
-	if err == nil {
-		hostname = strings.TrimSpace(strings.ToLower(hostname))
-		if hostname != "" {
-			sum := sha256.Sum256([]byte(hostname))
-			return hex.EncodeToString(sum[:16])
-		}
-	}
-
 	return ""
+}
+
+func detectWindowsMachineGUID() string {
+	out, err := runHostProbeCommand("reg", "query", `HKLM\SOFTWARE\Microsoft\Cryptography`, "/v", "MachineGuid")
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		if !strings.Contains(strings.ToLower(line), "machineguid") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) == 0 {
+			continue
+		}
+		value := strings.TrimSpace(parts[len(parts)-1])
+		if value != "" {
+			return hostStableHash(value)
+		}
+	}
+	return ""
+}
+
+func detectMacPlatformUUID() string {
+	out, err := runHostProbeCommand("ioreg", "-rd1", "-c", "IOPlatformExpertDevice")
+	if err == nil {
+		lines := strings.Split(out, "\n")
+		for _, line := range lines {
+			if !strings.Contains(line, "IOPlatformUUID") {
+				continue
+			}
+			if idx := strings.Index(line, "="); idx >= 0 {
+				value := strings.TrimSpace(strings.Trim(line[idx+1:], `"`))
+				if value != "" {
+					return hostStableHash(value)
+				}
+			}
+		}
+	}
+
+	out, err = runHostProbeCommand("system_profiler", "SPHardwareDataType")
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(strings.ToLower(trimmed), "hardware uuid") {
+			continue
+		}
+		if idx := strings.Index(trimmed, ":"); idx >= 0 {
+			value := strings.TrimSpace(trimmed[idx+1:])
+			if value != "" {
+				return hostStableHash(value)
+			}
+		}
+	}
+	return ""
+}
+
+func runHostProbeCommand(name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := hostPlatformExecCommandContext(ctx, name, args...)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func hostStableHash(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:16])
 }
 
 func newRandomID() (string, error) {
