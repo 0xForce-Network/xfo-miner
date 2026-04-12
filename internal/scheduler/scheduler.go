@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -74,6 +75,11 @@ type Scheduler struct {
 	startDetached   func(command string, args []string) (*process.DetachedProcess, error)
 	stopDetached    func(pid int, gracePeriod int) error
 	isDetachedAlive func(pid int) bool
+	targetCache     targetCache
+
+	taskMu        sync.RWMutex
+	activeWPATask bool
+	verification  *wpaVerificationState
 }
 
 func New(cfg *config.Config, version string, capabilities *env.SystemCapabilities, procManager process.Manager, poolClient pool.Client, logger *slog.Logger) *Scheduler {
@@ -94,10 +100,16 @@ func New(cfg *config.Config, version string, capabilities *env.SystemCapabilitie
 		startDetached:   process.StartDetached,
 		stopDetached:    process.StopDetached,
 		isDetachedAlive: process.IsProcessRunning,
+		verification:    newWPAVerificationState(),
 	}
 
 	s.hashcatRunner = NewHashcatRunner(procManager, cfg.HashcatPath, logger)
 	s.containerRunner = NewContainerRunner(procManager, logger)
+	targetCacheDir := ""
+	if identityPath := strings.TrimSpace(cfg.IdentityStatePath()); identityPath != "" {
+		targetCacheDir = filepath.Join(filepath.Dir(identityPath), "targets")
+	}
+	s.targetCache = NewTargetCache(targetCacheDir, nil)
 	s.newPoller = func(currentVer updater.Version, onUpdate func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
 		interval := time.Duration(cfg.AutoUpdate.PollIntervalSec) * time.Second
 		jitterMax := time.Duration(cfg.AutoUpdate.JitterMaxSec) * time.Second
@@ -178,18 +190,24 @@ func (s *Scheduler) Run(ctx context.Context) error {
 }
 
 func (s *Scheduler) buildLoginMessage() *pool.LoginMessage {
+	verificationSnapshot := s.verification.snapshot()
+
 	login := &pool.LoginMessage{
-		Type:               "login",
-		NodeID:             s.cfg.NodeID,
-		WalletAddress:      s.cfg.WalletAddress,
-		WorkerName:         s.cfg.WorkerName,
-		HostPlatformID:     s.cfg.HostPlatformID,
-		HostPlatformSource: s.cfg.HostPlatformSource,
-		PersistentMinerID:  s.cfg.PersistentMinerID,
-		IdentityMode:       s.cfg.IdentityMode,
-		Devices:            s.loginDevices,
-		Version:            s.version,
-		OS:                 runtime.GOOS + "-" + runtime.GOARCH,
+		Type:                       "login",
+		NodeID:                     s.cfg.NodeID,
+		WalletAddress:              s.cfg.WalletAddress,
+		WorkerName:                 s.cfg.WorkerName,
+		HostPlatformID:             s.cfg.HostPlatformID,
+		HostPlatformSource:         s.cfg.HostPlatformSource,
+		PersistentMinerID:          s.cfg.PersistentMinerID,
+		IdentityMode:               s.cfg.IdentityMode,
+		Devices:                    s.loginDevices,
+		LastVerifiedEpochID:        verificationSnapshot.LastVerifiedEpochID,
+		LastVerifiedAt:             verificationSnapshot.LastVerifiedAt,
+		VerificationState:          verificationSnapshot.VerificationState,
+		VerificationDeferredReason: verificationSnapshot.VerificationDeferredReason,
+		Version:                    s.version,
+		OS:                         runtime.GOOS + "-" + runtime.GOARCH,
 		Capabilities: &pool.CapabilitiesData{
 			HasGPU:         s.capabilities.HasGPU,
 			GPUCount:       len(s.capabilities.GPUs),
@@ -330,8 +348,31 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 			s.logger.Warn("invalid job_gpu message", "error", err)
 			return
 		}
+		s.logger.Info("[scheduler] job_gpu received",
+			"job_id", job.JobID,
+			"parent_job_id", job.ParentJobID,
+			"target", job.Target,
+			"target_url", job.TargetURL,
+			"target_sha256", job.TargetSHA256,
+			"hash_mode", job.HashMode,
+			"skip", job.Skip,
+			"limit", job.Limit,
+			"has_keyspace_contract", len(job.KeyspaceContract) > 0,
+			"keyspace_contract_raw", truncateForLog(string(job.KeyspaceContract), 300),
+			"challenge_id", job.ChallengeID,
+			"verification_epoch_id", job.VerificationEpochID,
+			"ctx_err", ctx.Err(),
+		)
+		if blocked, reason := s.verification.shouldBlockJob(&job, s.hasActiveWPATask()); blocked {
+			s.logger.Warn("[scheduler] job_gpu blocked by verification gate", "job_id", job.JobID, "reason", reason)
+			s.reportVerificationGateFailure(&job, reason)
+			return
+		}
+		s.logger.Info("[scheduler] entering WPA_AUDIT", "job_id", job.JobID)
 		if err := s.enterWPAAudit(ctx, &job); err != nil {
-			s.logger.Error("failed WPA_AUDIT", "error", err)
+			s.logger.Error("failed WPA_AUDIT", "job_id", job.JobID, "error", err)
+		} else {
+			s.logger.Info("[scheduler] enterWPAAudit completed successfully", "job_id", job.JobID)
 		}
 	case "job_container":
 		var job pool.JobContainerMessage
@@ -370,6 +411,12 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 func (s *Scheduler) handleLoginAck(ack *pool.LoginAckMessage) {
 	if ack == nil {
 		return
+	}
+
+	if ack.VerificationRequired {
+		s.verification.markRequirement(ack.VerificationEpochID, s.hasActiveWPATask())
+	} else if strings.TrimSpace(ack.VerificationState) == string(VerificationStateFresh) {
+		s.verification.markFresh(ack.VerificationEpochID)
 	}
 
 	identityPath := s.cfg.IdentityStatePath()
@@ -452,24 +499,223 @@ func (s *Scheduler) enterStandby(ctx context.Context) error {
 func (s *Scheduler) enterWPAAudit(ctx context.Context, job *pool.JobGPUMessage) error {
 	s.setState(StateWPAAudit)
 	defer s.restoreStandby(context.Background())
+	s.setActiveWPATask(true)
+	defer s.setActiveWPATask(false)
+
+	isVerificationJob := isVerificationChallengeJob(job, s.verification.currentRequiredEpoch())
+	verificationSucceeded := false
+	s.logger.Info("[enterWPAAudit] starting",
+		"job_id", job.JobID,
+		"is_verification_job", isVerificationJob,
+		"ctx_err", ctx.Err(),
+	)
 
 	if err := s.stopIdleMiner(ctx); err != nil {
+		s.logger.Error("[enterWPAAudit] stopIdleMiner failed", "job_id", job.JobID, "error", err)
 		return err
 	}
 	if err := s.xmrigManager.SetHeartbeatMode(ctx); err != nil {
+		s.logger.Error("[enterWPAAudit] SetHeartbeatMode failed", "job_id", job.JobID, "error", err)
 		return fmt.Errorf("set xmrig heartbeat mode: %w", err)
 	}
 
-	return s.hashcatRunner.Run(ctx, job,
+	s.logger.Info("[enterWPAAudit] resolving hashcat target", "job_id", job.JobID, "target_url", job.TargetURL, "target", job.Target)
+	targetPath, err := s.resolveHashcatTarget(ctx, job)
+	if err != nil {
+		s.logger.Error("[enterWPAAudit] resolveHashcatTarget failed", "job_id", job.JobID, "error", err)
+		s.reportJobFailure(job, err)
+		return err
+	}
+	s.logger.Info("[enterWPAAudit] target resolved", "job_id", job.JobID, "target_path", targetPath)
+	job.Target = targetPath
+
+	s.logger.Info("[enterWPAAudit] calling hashcatRunner.Run", "job_id", job.JobID, "ctx_err", ctx.Err())
+	err = s.hashcatRunner.Run(ctx, job,
 		func(msg *pool.ProgressMessage) {
 			msg.ParentJobID = job.ParentJobID
-			_ = s.poolClient.SendProgress(msg)
+			if err := s.poolClient.SendProgress(msg); err != nil {
+				s.logger.Warn("failed to send hashcat progress to pool",
+					"job_id", job.JobID,
+					"parent_job_id", job.ParentJobID,
+					"percent", msg.Percent,
+					"error", err,
+				)
+			}
 		},
 		func(msg *pool.ResultMessage) {
+			s.logger.Info("[enterWPAAudit] onResult callback fired",
+				"job_id", job.JobID,
+				"result_status", msg.Status,
+				"result_data", msg.Data,
+				"is_verification_job", isVerificationJob,
+			)
+			if isVerificationJob && verificationResultSucceeded(msg) {
+				verificationSucceeded = true
+				s.logger.Info("[enterWPAAudit] verification succeeded", "job_id", job.JobID)
+			}
 			msg.ParentJobID = job.ParentJobID
-			_ = s.poolClient.SendResult(msg)
+			s.logger.Info("[enterWPAAudit] sending result to pool",
+				"job_id", job.JobID,
+				"parent_job_id", job.ParentJobID,
+				"status", msg.Status,
+				"data", msg.Data,
+			)
+			if err := s.poolClient.SendResult(msg); err != nil {
+				s.logger.Error("failed to send hashcat result to pool",
+					"job_id", job.JobID,
+					"parent_job_id", job.ParentJobID,
+					"status", msg.Status,
+					"error", err,
+				)
+			} else {
+				s.logger.Info("[enterWPAAudit] result sent to pool successfully",
+					"job_id", job.JobID,
+					"status", msg.Status,
+				)
+			}
 		},
 	)
+	if err != nil {
+		s.logger.Error("[enterWPAAudit] hashcatRunner.Run returned error",
+			"job_id", job.JobID,
+			"error", err,
+			"ctx_err", ctx.Err(),
+		)
+		if isVerificationJob {
+			s.verification.markFailed()
+		}
+		s.reportJobFailure(job, err)
+		return err
+	}
+	s.logger.Info("[enterWPAAudit] hashcatRunner.Run completed successfully",
+		"job_id", job.JobID,
+		"verification_succeeded", verificationSucceeded,
+	)
+
+	if isVerificationJob {
+		if !verificationSucceeded {
+			s.verification.markFailed()
+			return nil
+		}
+		epochID := strings.TrimSpace(job.VerificationEpochID)
+		if epochID == "" {
+			epochID = s.verification.currentRequiredEpoch()
+		}
+		s.verification.markFresh(epochID)
+	}
+
+	return nil
+}
+
+func verificationResultSucceeded(msg *pool.ResultMessage) bool {
+	if msg == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(msg.Status), "cracked")
+}
+
+func (s *Scheduler) resolveHashcatTarget(ctx context.Context, job *pool.JobGPUMessage) (string, error) {
+	if job == nil {
+		return "", ErrInvalidRemoteTargetContract
+	}
+
+	if strings.TrimSpace(job.TargetURL) == "" {
+		legacyTarget := strings.TrimSpace(job.Target)
+		if legacyTarget == "" {
+			return "", ErrInvalidRemoteTargetContract
+		}
+		return legacyTarget, nil
+	}
+
+	if s.targetCache == nil {
+		return "", ErrTargetCacheWriteFailed
+	}
+
+	spec := RemoteTargetSpec{
+		URL:      strings.TrimSpace(job.TargetURL),
+		SHA256:   strings.ToLower(strings.TrimSpace(job.TargetSHA256)),
+		Filename: strings.TrimSpace(job.TargetFilename),
+	}
+	return s.targetCache.Ensure(ctx, spec)
+}
+
+func (s *Scheduler) reportJobFailure(job *pool.JobGPUMessage, err error) {
+	if job == nil {
+		return
+	}
+
+	status := "target_cache_write_failed"
+	switch {
+	case errors.Is(err, ErrInvalidRemoteTargetContract):
+		status = "invalid_remote_target_contract"
+	case errors.Is(err, ErrTargetDownloadFailed):
+		status = "target_download_failed"
+	case errors.Is(err, ErrTargetChecksumMismatch):
+		status = "target_checksum_mismatch"
+	case errors.Is(err, ErrTargetCacheWriteFailed):
+		status = "target_cache_write_failed"
+	case errors.Is(err, ErrUnsupportedKeyspaceContract):
+		status = "unsupported_keyspace_contract"
+	case errors.Is(err, ErrInvalidKeyspaceContract):
+		status = "invalid_keyspace_contract"
+	case errors.Is(err, ErrCandidateMaterializationFailed):
+		status = "candidate_materialization_failed"
+	default:
+		status = "runtime_error"
+	}
+
+	if sendErr := s.poolClient.SendResult(&pool.ResultMessage{
+		Type:        "result",
+		JobID:       job.JobID,
+		ParentJobID: job.ParentJobID,
+		Status:      status,
+		Data:        err.Error(),
+	}); sendErr != nil {
+		s.logger.Error("failed to send job failure result to pool",
+			"job_id", job.JobID,
+			"parent_job_id", job.ParentJobID,
+			"status", status,
+			"error", sendErr,
+		)
+	}
+}
+
+func (s *Scheduler) reportVerificationGateFailure(job *pool.JobGPUMessage, reason string) {
+	if job == nil {
+		return
+	}
+
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "verification_state_invalid"
+	}
+
+	if err := s.poolClient.SendResult(&pool.ResultMessage{
+		Type:        "result",
+		JobID:       job.JobID,
+		ParentJobID: job.ParentJobID,
+		Status:      reason,
+		Data:        reason,
+	}); err != nil {
+		s.logger.Error("failed to send verification gate failure result to pool",
+			"job_id", job.JobID,
+			"parent_job_id", job.ParentJobID,
+			"status", reason,
+			"error", err,
+		)
+	}
+}
+
+func (s *Scheduler) setActiveWPATask(active bool) {
+	s.taskMu.Lock()
+	defer s.taskMu.Unlock()
+	s.activeWPATask = active
+}
+
+func (s *Scheduler) hasActiveWPATask() bool {
+	s.taskMu.RLock()
+	defer s.taskMu.RUnlock()
+	return s.activeWPATask
 }
 
 func (s *Scheduler) enterAIContainer(ctx context.Context, job *pool.JobContainerMessage) error {

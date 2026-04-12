@@ -15,6 +15,7 @@ import (
 // Manager defines process lifecycle controls for managed subprocesses.
 type Manager interface {
 	Start(ctx context.Context, name string, command string, args []string) (*ManagedProcess, error)
+	StartRaw(ctx context.Context, name string, command string, args []string) (*ManagedProcess, error)
 	Stop(ctx context.Context, name string, gracePeriod time.Duration) error
 	StopAll(ctx context.Context, gracePeriod time.Duration) error
 	Get(name string) (*ManagedProcess, bool)
@@ -55,6 +56,14 @@ func NewRealManager(logger *slog.Logger, opts ...ManagerOption) *RealManager {
 }
 
 func (m *RealManager) Start(ctx context.Context, name string, command string, args []string) (*ManagedProcess, error) {
+	return m.start(ctx, name, command, args, true)
+}
+
+func (m *RealManager) StartRaw(ctx context.Context, name string, command string, args []string) (*ManagedProcess, error) {
+	return m.start(ctx, name, command, args, false)
+}
+
+func (m *RealManager) start(ctx context.Context, name string, command string, args []string, autoPipe bool) (*ManagedProcess, error) {
 	m.mu.Lock()
 	if _, exists := m.procs[name]; exists {
 		m.mu.Unlock()
@@ -72,11 +81,15 @@ func (m *RealManager) Start(ctx context.Context, name string, command string, ar
 		return nil, err
 	}
 
-	m.logger.Info("process started", "name", name, "command", command)
-	if m.logDir != "" {
-		go m.pipeToFile(proc, name)
+	if autoPipe {
+		m.logger.Info("process started", "name", name, "command", command)
+		if m.logDir != "" {
+			go m.pipeToFile(proc, name)
+		} else {
+			go m.pipeToLogger(proc, name)
+		}
 	} else {
-		go m.pipeToLogger(proc, name)
+		m.logger.Info("process started (raw)", "name", name, "command", command)
 	}
 
 	go func(procName string, done <-chan struct{}) {
@@ -244,6 +257,13 @@ func NewNoopManager() *NoopManager {
 }
 
 func (m *NoopManager) Start(_ context.Context, name string, command string, args []string) (*ManagedProcess, error) {
+	_ = name
+	_ = command
+	_ = args
+	return nil, nil
+}
+
+func (m *NoopManager) StartRaw(_ context.Context, name string, command string, args []string) (*ManagedProcess, error) {
 	_ = name
 	_ = command
 	_ = args

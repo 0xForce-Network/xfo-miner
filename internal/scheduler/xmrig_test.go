@@ -319,6 +319,10 @@ func (m *flakyProcessManager) Start(_ context.Context, _ string, _ string, _ []s
 	return &process.ManagedProcess{Name: "xmrig_l1", Done: make(chan struct{})}, nil
 }
 
+func (m *flakyProcessManager) StartRaw(ctx context.Context, name string, command string, args []string) (*process.ManagedProcess, error) {
+	return m.Start(ctx, name, command, args)
+}
+
 func (m *flakyProcessManager) Stop(_ context.Context, _ string, _ time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -429,6 +433,10 @@ func (m *captureProcessManager) Start(_ context.Context, _ string, _ string, arg
 	m.running = true
 	m.lastArgs = append([]string(nil), args...)
 	return &process.ManagedProcess{Name: "xmrig_l1", Done: make(chan struct{})}, nil
+}
+
+func (m *captureProcessManager) StartRaw(ctx context.Context, name string, command string, args []string) (*process.ManagedProcess, error) {
+	return m.Start(ctx, name, command, args)
 }
 
 func (m *captureProcessManager) Stop(_ context.Context, _ string, _ time.Duration) error {

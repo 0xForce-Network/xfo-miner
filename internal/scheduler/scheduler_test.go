@@ -86,6 +86,10 @@ func (m *mockProcessManager) Start(_ context.Context, name string, _ string, _ [
 	return &process.ManagedProcess{Name: name, Done: make(chan struct{})}, nil
 }
 
+func (m *mockProcessManager) StartRaw(ctx context.Context, name string, command string, args []string) (*process.ManagedProcess, error) {
+	return m.Start(ctx, name, command, args)
+}
+
 func (m *mockProcessManager) Stop(_ context.Context, name string, _ time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -119,6 +123,7 @@ type mockPoolClient struct {
 	reconnect  func()
 	connected  bool
 	lastLogin  *pool.LoginMessage
+	results    []pool.ResultMessage
 	connectErr error
 	loginErr   error
 	connects   int
@@ -151,9 +156,16 @@ func (m *mockPoolClient) SendLogin(login *pool.LoginMessage) error {
 	m.lastLogin = &copy
 	return nil
 }
-func (m *mockPoolClient) SendHeartbeat() error                                   { return nil }
-func (m *mockPoolClient) SendProgress(_ *pool.ProgressMessage) error             { return nil }
-func (m *mockPoolClient) SendResult(_ *pool.ResultMessage) error                 { return nil }
+func (m *mockPoolClient) SendHeartbeat() error                       { return nil }
+func (m *mockPoolClient) SendProgress(_ *pool.ProgressMessage) error { return nil }
+func (m *mockPoolClient) SendResult(result *pool.ResultMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if result != nil {
+		m.results = append(m.results, *result)
+	}
+	return nil
+}
 func (m *mockPoolClient) SendContainerReady(_ *pool.ContainerReadyMessage) error { return nil }
 func (m *mockPoolClient) SendTelemetryL1(_ *pool.TelemetryL1Message) error       { return nil }
 func (m *mockPoolClient) SendTelemetryL2(_ *pool.TelemetryL2Message) error       { return nil }
@@ -212,6 +224,16 @@ func (m *mockPoolClient) loginCount() int {
 	return m.logins
 }
 
+func (m *mockPoolClient) latestResult() *pool.ResultMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.results) == 0 {
+		return nil
+	}
+	copy := m.results[len(m.results)-1]
+	return &copy
+}
+
 type mockHashcatRunner struct{}
 
 func (m *mockHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage, onProgress func(*pool.ProgressMessage), onResult func(*pool.ResultMessage)) error {
@@ -222,6 +244,68 @@ func (m *mockHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage, onPr
 		onResult(&pool.ResultMessage{Type: "result", JobID: job.JobID, Status: "exhausted"})
 	}
 	return nil
+}
+
+type statusHashcatRunner struct {
+	status string
+	data   string
+}
+
+func (m *statusHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage, onProgress func(*pool.ProgressMessage), onResult func(*pool.ResultMessage)) error {
+	if onProgress != nil {
+		onProgress(&pool.ProgressMessage{Type: "progress", JobID: job.JobID, Current: 1, Total: 1, Percent: 100})
+	}
+	if onResult != nil {
+		onResult(&pool.ResultMessage{Type: "result", JobID: job.JobID, Status: m.status, Data: m.data})
+	}
+	return nil
+}
+
+type capturingHashcatRunner struct {
+	mu         sync.Mutex
+	runCount   int
+	lastTarget string
+}
+
+type failingHashcatRunner struct {
+	err error
+}
+
+func (m *failingHashcatRunner) Run(_ context.Context, _ *pool.JobGPUMessage, _ func(*pool.ProgressMessage), _ func(*pool.ResultMessage)) error {
+	return m.err
+}
+
+func (m *capturingHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage, _ func(*pool.ProgressMessage), _ func(*pool.ResultMessage)) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runCount++
+	if job != nil {
+		m.lastTarget = job.Target
+	}
+	return nil
+}
+
+func (m *capturingHashcatRunner) RunCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.runCount
+}
+
+func (m *capturingHashcatRunner) LastTarget() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastTarget
+}
+
+type mockTargetCache struct {
+	ensure func(context.Context, RemoteTargetSpec) (string, error)
+}
+
+func (m *mockTargetCache) Ensure(ctx context.Context, spec RemoteTargetSpec) (string, error) {
+	if m.ensure != nil {
+		return m.ensure(ctx, spec)
+	}
+	return "", nil
 }
 
 type mockContainerRunner struct{}
@@ -439,6 +523,226 @@ func TestSchedulerTransitionToWPAAudit(t *testing.T) {
 
 	pcl.emit(pool.JobGPUMessage{Type: "job_gpu", JobID: "job1", HashMode: 22000, Target: "hash", Skip: 0, Limit: 1})
 	waitFor(t, func() bool { return detached.stopCount() >= 1 })
+}
+
+func TestSchedulerTransitionToWPAAuditResolvesRemoteTarget(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+	s.targetCache = &mockTargetCache{ensure: func(_ context.Context, spec RemoteTargetSpec) (string, error) {
+		if spec.URL != "https://pool.local/artifacts/t1.hc22000" {
+			t.Fatalf("unexpected target URL: %q", spec.URL)
+		}
+		if spec.SHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+			t.Fatalf("unexpected target SHA256: %q", spec.SHA256)
+		}
+		return "/tmp/miner-targets/a.hc22000", nil
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:         "job_gpu",
+		JobID:        "job-remote-ok",
+		HashMode:     22000,
+		TargetURL:    "https://pool.local/artifacts/t1.hc22000",
+		TargetSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Skip:         0,
+		Limit:        1,
+	})
+
+	waitFor(t, func() bool { return runner.RunCount() >= 1 })
+	if got := runner.LastTarget(); got != "/tmp/miner-targets/a.hc22000" {
+		t.Fatalf("expected resolved cached target, got %q", got)
+	}
+}
+
+func TestSchedulerTransitionToWPAAuditReportsRemoteTargetFailure(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+	s.targetCache = &mockTargetCache{ensure: func(_ context.Context, _ RemoteTargetSpec) (string, error) {
+		return "", ErrTargetChecksumMismatch
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:         "job_gpu",
+		JobID:        "job-remote-fail",
+		HashMode:     22000,
+		TargetURL:    "https://pool.local/artifacts/t2.hc22000",
+		TargetSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Skip:         0,
+		Limit:        1,
+	})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "job-remote-fail"
+	})
+
+	result := pcl.latestResult()
+	if result == nil {
+		t.Fatalf("expected a result message")
+	}
+	if result.Status != "target_checksum_mismatch" {
+		t.Fatalf("expected target_checksum_mismatch, got %q", result.Status)
+	}
+	if runner.RunCount() != 0 {
+		t.Fatalf("expected hashcat not to run on remote target failure")
+	}
+}
+
+func TestSchedulerTransitionToWPAAuditReportsUnsupportedKeyspaceContract(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.hashcatRunner = &failingHashcatRunner{err: ErrUnsupportedKeyspaceContract}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:             "job_gpu",
+		JobID:            "job-keyspace-unsupported",
+		HashMode:         22000,
+		Target:           "legacy-target.hc22000",
+		KeyspaceContract: json.RawMessage(`{"type":"dictionary_slice"}`),
+		Skip:             0,
+		Limit:            1,
+	})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "job-keyspace-unsupported"
+	})
+
+	result := pcl.latestResult()
+	if result == nil {
+		t.Fatalf("expected a result message")
+	}
+	if result.Status != "unsupported_keyspace_contract" {
+		t.Fatalf("expected unsupported_keyspace_contract, got %q", result.Status)
+	}
+}
+
+func TestSchedulerTransitionToWPAAuditReportsInvalidKeyspaceContract(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.hashcatRunner = &failingHashcatRunner{err: ErrInvalidKeyspaceContract}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:             "job_gpu",
+		JobID:            "job-keyspace-invalid",
+		HashMode:         22000,
+		Target:           "legacy-target.hc22000",
+		KeyspaceContract: json.RawMessage(`{"type":"fixed_candidate_list","candidates":[]}`),
+		Skip:             0,
+		Limit:            1,
+	})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "job-keyspace-invalid"
+	})
+
+	result := pcl.latestResult()
+	if result == nil {
+		t.Fatalf("expected a result message")
+	}
+	if result.Status != "invalid_keyspace_contract" {
+		t.Fatalf("expected invalid_keyspace_contract, got %q", result.Status)
+	}
+}
+
+func TestSchedulerVerificationChallengeExhaustedDoesNotMarkFresh(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.hashcatRunner = &statusHashcatRunner{status: "exhausted"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.LoginAckMessage{Type: "login_ack", Status: pool.PoolStatusArmed, VerificationRequired: true, VerificationEpochID: "epoch-1"})
+	pcl.emit(pool.JobGPUMessage{
+		Type:                 "job_gpu",
+		JobID:                "job-verification-exhausted",
+		HashMode:             22000,
+		Target:               "hash",
+		Skip:                 0,
+		Limit:                1,
+		VerificationRequired: true,
+		VerificationEpochID:  "epoch-1",
+	})
+
+	waitFor(t, func() bool {
+		login := s.buildLoginMessage()
+		return login.VerificationState == string(VerificationStateFailed)
+	})
+
+	login := s.buildLoginMessage()
+	if login.VerificationState != string(VerificationStateFailed) {
+		t.Fatalf("expected verification_state failed, got %q", login.VerificationState)
+	}
+	if login.LastVerifiedEpochID != "" {
+		t.Fatalf("expected last_verified_epoch_id to remain empty on exhausted verification, got %q", login.LastVerifiedEpochID)
+	}
+}
+
+func TestSchedulerVerificationChallengeCrackedMarksFresh(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.hashcatRunner = &statusHashcatRunner{status: "cracked", data: "123123456456"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.LoginAckMessage{Type: "login_ack", Status: pool.PoolStatusArmed, VerificationRequired: true, VerificationEpochID: "epoch-2"})
+	pcl.emit(pool.JobGPUMessage{
+		Type:                 "job_gpu",
+		JobID:                "job-verification-cracked",
+		HashMode:             22000,
+		Target:               "hash",
+		Skip:                 0,
+		Limit:                1,
+		VerificationRequired: true,
+		VerificationEpochID:  "epoch-2",
+	})
+
+	waitFor(t, func() bool {
+		login := s.buildLoginMessage()
+		return login.VerificationState == string(VerificationStateFresh) && login.LastVerifiedEpochID == "epoch-2"
+	})
+
+	login := s.buildLoginMessage()
+	if login.VerificationState != string(VerificationStateFresh) {
+		t.Fatalf("expected verification_state fresh, got %q", login.VerificationState)
+	}
+	if login.LastVerifiedEpochID != "epoch-2" {
+		t.Fatalf("expected last_verified_epoch_id epoch-2, got %q", login.LastVerifiedEpochID)
+	}
+	if login.LastVerifiedAt <= 0 {
+		t.Fatalf("expected last_verified_at to be populated for successful verification")
+	}
 }
 
 func TestSchedulerTransitionToAIContainer(t *testing.T) {

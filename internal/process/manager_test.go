@@ -70,9 +70,9 @@ func TestStdoutCapture(t *testing.T) {
 	t.Parallel()
 
 	mgr := newTestManager()
-	proc, err := mgr.Start(context.Background(), "echo", "sh", []string{"-c", "echo hello"})
+	proc, err := mgr.StartRaw(context.Background(), "echo", "sh", []string{"-c", "echo hello"})
 	if err != nil {
-		t.Fatalf("Start() error = %v", err)
+		t.Fatalf("StartRaw() error = %v", err)
 	}
 
 	lines := make([]string, 0)

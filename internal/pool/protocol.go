@@ -23,19 +23,23 @@ type CapabilitiesData struct {
 
 // Miner -> Pool
 type LoginMessage struct {
-	Type               string            `json:"type"`
-	NodeID             string            `json:"node_id"`
-	WalletAddress      string            `json:"wallet_address"`
-	WorkerName         string            `json:"worker_name"`
-	LegacyClaim        *LegacyClaim      `json:"legacy_claim,omitempty"`
-	HostPlatformID     string            `json:"host_platform_id,omitempty"`
-	HostPlatformSource string            `json:"host_platform_source,omitempty"`
-	PersistentMinerID  string            `json:"persistent_miner_id,omitempty"`
-	IdentityMode       string            `json:"identity_mode,omitempty"`
-	Devices            []GPUIdentity     `json:"devices,omitempty"`
-	Version            string            `json:"version"`
-	OS                 string            `json:"os"`
-	Capabilities       *CapabilitiesData `json:"capabilities"`
+	Type                       string            `json:"type"`
+	NodeID                     string            `json:"node_id"`
+	WalletAddress              string            `json:"wallet_address"`
+	WorkerName                 string            `json:"worker_name"`
+	LegacyClaim                *LegacyClaim      `json:"legacy_claim,omitempty"`
+	HostPlatformID             string            `json:"host_platform_id,omitempty"`
+	HostPlatformSource         string            `json:"host_platform_source,omitempty"`
+	PersistentMinerID          string            `json:"persistent_miner_id,omitempty"`
+	IdentityMode               string            `json:"identity_mode,omitempty"`
+	Devices                    []GPUIdentity     `json:"devices,omitempty"`
+	LastVerifiedEpochID        string            `json:"last_verified_epoch_id,omitempty"`
+	LastVerifiedAt             int64             `json:"last_verified_at,omitempty"`
+	VerificationState          string            `json:"verification_state,omitempty"`
+	VerificationDeferredReason string            `json:"verification_deferred_reason,omitempty"`
+	Version                    string            `json:"version"`
+	OS                         string            `json:"os"`
+	Capabilities               *CapabilitiesData `json:"capabilities"`
 }
 
 type LegacyClaim struct {
@@ -117,14 +121,23 @@ type ServerMessage struct {
 }
 
 type JobGPUMessage struct {
-	Type        string `json:"type"`
-	JobID       string `json:"job_id"`
-	HashMode    int    `json:"hash_mode"`
-	Target      string `json:"target"`
-	Skip        int64  `json:"skip"`
-	Limit       int64  `json:"limit"`
-	ParentJobID string `json:"parent_job_id,omitempty"`
-	ChunkIndex  int    `json:"chunk_index,omitempty"`
+	Type                 string          `json:"type"`
+	JobID                string          `json:"job_id"`
+	HashMode             int             `json:"hash_mode"`
+	Target               string          `json:"target"`
+	TargetURL            string          `json:"target_url,omitempty"`
+	TargetSHA256         string          `json:"target_sha256,omitempty"`
+	TargetFilename       string          `json:"target_filename,omitempty"`
+	ArtifactID           string          `json:"artifact_id,omitempty"`
+	TargetCanary         string          `json:"target_canary,omitempty"`
+	ChallengeID          string          `json:"challenge_id,omitempty"`
+	VerificationRequired bool            `json:"verification_required,omitempty"`
+	VerificationEpochID  string          `json:"verification_epoch_id,omitempty"`
+	KeyspaceContract     json.RawMessage `json:"keyspace_contract,omitempty"`
+	Skip                 int64           `json:"skip"`
+	Limit                int64           `json:"limit"`
+	ParentJobID          string          `json:"parent_job_id,omitempty"`
+	ChunkIndex           int             `json:"chunk_index,omitempty"`
 }
 
 type JobContainerMessage struct {
@@ -140,10 +153,14 @@ type PoolStatusMessage struct {
 }
 
 type LoginAckMessage struct {
-	Type            string `json:"type"`
-	Status          string `json:"status"`
-	MigrationStatus string `json:"migration_status,omitempty"`
-	StakeRecovered  bool   `json:"stake_recovered,omitempty"`
+	Type                       string `json:"type"`
+	Status                     string `json:"status"`
+	VerificationRequired       bool   `json:"verification_required,omitempty"`
+	VerificationEpochID        string `json:"verification_epoch_id,omitempty"`
+	VerificationState          string `json:"verification_state,omitempty"`
+	VerificationDeferredReason string `json:"verification_deferred_reason,omitempty"`
+	MigrationStatus            string `json:"migration_status,omitempty"`
+	StakeRecovered             bool   `json:"stake_recovered,omitempty"`
 }
 
 type OTAUpdateMessage struct {
