@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/0xforce/xfo-miner/internal/pool"
 )
 
 var (
@@ -35,7 +37,7 @@ type materializedKeyspace struct {
 	CleanupPaths []string
 }
 
-func materializeKeyspaceContract(jobID string, raw json.RawMessage, fallbackSkip int64, fallbackLimit int64) (*materializedKeyspace, error) {
+func materializeKeyspaceContract(jobID string, dictionary *pool.DictionarySpec, raw json.RawMessage, fallbackSkip int64, fallbackLimit int64) (*materializedKeyspace, error) {
 	keyspace := &materializedKeyspace{Skip: fallbackSkip, Limit: fallbackLimit}
 	if len(raw) == 0 {
 		return keyspace, nil
@@ -56,11 +58,49 @@ func materializeKeyspaceContract(jobID string, raw json.RawMessage, fallbackSkip
 		return materializeFixedCandidateList(jobID, keyspace, contract.Candidates)
 	case "mask_segment":
 		return materializeMaskSegment(keyspace, contract)
-	case "dictionary_slice", "deterministic_range":
+	case "dictionary_slice":
+		return materializeDictionarySlice(keyspace, dictionary, contract)
+	case "deterministic_range":
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedKeyspaceContract, contractType)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedKeyspaceContract, contractType)
 	}
+}
+
+func materializeDictionarySlice(keyspace *materializedKeyspace, dictionary *pool.DictionarySpec, contract keyspaceContract) (*materializedKeyspace, error) {
+	if dictionary == nil {
+		return nil, fmt.Errorf("%w: dictionary_slice requires dictionary payload", ErrInvalidKeyspaceContract)
+	}
+
+	runtimePath := strings.TrimSpace(dictionary.RuntimePath)
+	if runtimePath == "" {
+		return nil, fmt.Errorf("%w: dictionary runtime path missing", ErrCandidateMaterializationFailed)
+	}
+
+	if contract.Skip != nil {
+		if *contract.Skip < 0 {
+			return nil, fmt.Errorf("%w: dictionary_slice skip must be non-negative", ErrInvalidKeyspaceContract)
+		}
+		keyspace.Skip = *contract.Skip
+	}
+	if contract.Limit != nil {
+		if *contract.Limit <= 0 {
+			return nil, fmt.Errorf("%w: dictionary_slice limit must be positive", ErrInvalidKeyspaceContract)
+		}
+		keyspace.Limit = *contract.Limit
+	}
+
+	if keyspace.Skip < 0 {
+		return nil, fmt.Errorf("%w: dictionary_slice fallback skip must be non-negative", ErrInvalidKeyspaceContract)
+	}
+	if keyspace.Limit <= 0 {
+		return nil, fmt.Errorf("%w: dictionary_slice fallback limit must be positive", ErrInvalidKeyspaceContract)
+	}
+
+	attackMode := 0
+	keyspace.AttackMode = &attackMode
+	keyspace.Inputs = append(keyspace.Inputs, runtimePath)
+	return keyspace, nil
 }
 
 func materializeFixedCandidateList(jobID string, keyspace *materializedKeyspace, candidates []string) (*materializedKeyspace, error) {

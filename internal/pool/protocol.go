@@ -125,6 +125,7 @@ type JobGPUMessage struct {
 	JobID                string          `json:"job_id"`
 	HashMode             int             `json:"hash_mode"`
 	Target               string          `json:"target"`
+	Dictionary           *DictionarySpec `json:"dictionary,omitempty"`
 	TargetURL            string          `json:"target_url,omitempty"`
 	TargetSHA256         string          `json:"target_sha256,omitempty"`
 	TargetFilename       string          `json:"target_filename,omitempty"`
@@ -138,6 +139,15 @@ type JobGPUMessage struct {
 	Limit                int64           `json:"limit"`
 	ParentJobID          string          `json:"parent_job_id,omitempty"`
 	ChunkIndex           int             `json:"chunk_index,omitempty"`
+}
+
+type DictionarySpec struct {
+	DictID         string `json:"dict_id,omitempty"`
+	DictURL        string `json:"dict_url,omitempty"`
+	CompressFormat string `json:"compress_format,omitempty"`
+	Checksum       string `json:"checksum,omitempty"`
+	LineCount      int64  `json:"line_count,omitempty"`
+	RuntimePath    string `json:"-"`
 }
 
 type JobContainerMessage struct {

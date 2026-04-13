@@ -76,6 +76,7 @@ type Scheduler struct {
 	stopDetached    func(pid int, gracePeriod int) error
 	isDetachedAlive func(pid int) bool
 	targetCache     targetCache
+	dictionaryCache dictionaryCache
 
 	taskMu        sync.RWMutex
 	activeWPATask bool
@@ -110,6 +111,11 @@ func New(cfg *config.Config, version string, capabilities *env.SystemCapabilitie
 		targetCacheDir = filepath.Join(filepath.Dir(identityPath), "targets")
 	}
 	s.targetCache = NewTargetCache(targetCacheDir, nil)
+	dictionaryCacheDir := ""
+	if identityPath := strings.TrimSpace(cfg.IdentityStatePath()); identityPath != "" {
+		dictionaryCacheDir = filepath.Join(filepath.Dir(identityPath), "dicts")
+	}
+	s.dictionaryCache = NewDictionaryCache(dictionaryCacheDir, nil)
 	s.newPoller = func(currentVer updater.Version, onUpdate func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
 		interval := time.Duration(cfg.AutoUpdate.PollIntervalSec) * time.Second
 		jitterMax := time.Duration(cfg.AutoUpdate.JitterMaxSec) * time.Second
@@ -352,6 +358,19 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 			"job_id", job.JobID,
 			"parent_job_id", job.ParentJobID,
 			"target", job.Target,
+			"has_dictionary", job.Dictionary != nil,
+			"dictionary_dict_id", func() string {
+				if job.Dictionary == nil {
+					return ""
+				}
+				return job.Dictionary.DictID
+			}(),
+			"dictionary_compress_format", func() string {
+				if job.Dictionary == nil {
+					return ""
+				}
+				return job.Dictionary.CompressFormat
+			}(),
 			"target_url", job.TargetURL,
 			"target_sha256", job.TargetSHA256,
 			"hash_mode", job.HashMode,
@@ -502,6 +521,17 @@ func (s *Scheduler) enterWPAAudit(ctx context.Context, job *pool.JobGPUMessage) 
 	s.setActiveWPATask(true)
 	defer s.setActiveWPATask(false)
 
+	if err := validateDictionaryAdmission(job); err != nil {
+		s.logger.Error("[enterWPAAudit] dictionary admission failed", "job_id", job.JobID, "error", err)
+		s.reportJobFailure(job, err)
+		return err
+	}
+	if err := s.resolveDictionaryRuntime(ctx, job); err != nil {
+		s.logger.Error("[enterWPAAudit] dictionary runtime resolve failed", "job_id", job.JobID, "error", err)
+		s.reportJobFailure(job, err)
+		return err
+	}
+
 	isVerificationJob := isVerificationChallengeJob(job, s.verification.currentRequiredEpoch())
 	verificationSucceeded := false
 	s.logger.Info("[enterWPAAudit] starting",
@@ -639,6 +669,37 @@ func (s *Scheduler) resolveHashcatTarget(ctx context.Context, job *pool.JobGPUMe
 	return s.targetCache.Ensure(ctx, spec)
 }
 
+func (s *Scheduler) resolveDictionaryRuntime(ctx context.Context, job *pool.JobGPUMessage) error {
+	if job == nil || job.Dictionary == nil {
+		return nil
+	}
+
+	if s.dictionaryCache == nil {
+		return ErrDictionaryCacheResolveFailed
+	}
+
+	result, err := s.dictionaryCache.Ensure(ctx, DictionaryCacheSpec{
+		DictID:         strings.TrimSpace(job.Dictionary.DictID),
+		DictURL:        strings.TrimSpace(job.Dictionary.DictURL),
+		CompressFormat: strings.ToLower(strings.TrimSpace(job.Dictionary.CompressFormat)),
+		Checksum:       strings.ToLower(strings.TrimSpace(job.Dictionary.Checksum)),
+		LineCount:      job.Dictionary.LineCount,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !result.Materialized {
+		return ErrDictionaryCacheResolveFailed
+	}
+	if strings.TrimSpace(result.DictPath) == "" {
+		return ErrDictionaryCacheResolveFailed
+	}
+	job.Dictionary.RuntimePath = strings.TrimSpace(result.DictPath)
+
+	return nil
+}
+
 func (s *Scheduler) reportJobFailure(job *pool.JobGPUMessage, err error) {
 	if job == nil {
 		return
@@ -660,6 +721,24 @@ func (s *Scheduler) reportJobFailure(job *pool.JobGPUMessage, err error) {
 		status = "invalid_keyspace_contract"
 	case errors.Is(err, ErrCandidateMaterializationFailed):
 		status = "candidate_materialization_failed"
+	case errors.Is(err, ErrInvalidDictionaryContract):
+		status = "invalid_dictionary_contract"
+	case errors.Is(err, ErrUnsupportedDictionaryFormat):
+		status = "unsupported_dictionary_format"
+	case errors.Is(err, ErrDictionaryCacheResolveFailed):
+		status = "dictionary_cache_resolve_failed"
+	case errors.Is(err, ErrDictionaryDownloadFailed):
+		status = "dictionary_download_failed"
+	case errors.Is(err, ErrDictionaryChecksumMismatch):
+		status = "dictionary_checksum_mismatch"
+	case errors.Is(err, ErrDictionaryCacheWriteFailed):
+		status = "dictionary_cache_write_failed"
+	case errors.Is(err, ErrDictionaryDiskSpaceInsufficient):
+		status = "dictionary_disk_space_insufficient"
+	case errors.Is(err, ErrDictionarySizeQuotaExceeded):
+		status = "dictionary_size_quota_exceeded"
+	case errors.Is(err, ErrDictionaryExtractFailed):
+		status = "dictionary_extract_failed"
 	default:
 		status = "runtime_error"
 	}

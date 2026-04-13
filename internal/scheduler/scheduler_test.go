@@ -262,9 +262,10 @@ func (m *statusHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage, on
 }
 
 type capturingHashcatRunner struct {
-	mu         sync.Mutex
-	runCount   int
-	lastTarget string
+	mu                        sync.Mutex
+	runCount                  int
+	lastTarget                string
+	lastDictionaryRuntimePath string
 }
 
 type failingHashcatRunner struct {
@@ -281,6 +282,9 @@ func (m *capturingHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage,
 	m.runCount++
 	if job != nil {
 		m.lastTarget = job.Target
+		if job.Dictionary != nil {
+			m.lastDictionaryRuntimePath = job.Dictionary.RuntimePath
+		}
 	}
 	return nil
 }
@@ -297,6 +301,12 @@ func (m *capturingHashcatRunner) LastTarget() string {
 	return m.lastTarget
 }
 
+func (m *capturingHashcatRunner) LastDictionaryRuntimePath() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastDictionaryRuntimePath
+}
+
 type mockTargetCache struct {
 	ensure func(context.Context, RemoteTargetSpec) (string, error)
 }
@@ -306,6 +316,17 @@ func (m *mockTargetCache) Ensure(ctx context.Context, spec RemoteTargetSpec) (st
 		return m.ensure(ctx, spec)
 	}
 	return "", nil
+}
+
+type mockDictionaryCache struct {
+	ensure func(context.Context, DictionaryCacheSpec) (DictionaryCacheResult, error)
+}
+
+func (m *mockDictionaryCache) Ensure(ctx context.Context, spec DictionaryCacheSpec) (DictionaryCacheResult, error) {
+	if m.ensure != nil {
+		return m.ensure(ctx, spec)
+	}
+	return DictionaryCacheResult{}, nil
 }
 
 type mockContainerRunner struct{}
@@ -617,7 +638,7 @@ func TestSchedulerTransitionToWPAAuditReportsUnsupportedKeyspaceContract(t *test
 		JobID:            "job-keyspace-unsupported",
 		HashMode:         22000,
 		Target:           "legacy-target.hc22000",
-		KeyspaceContract: json.RawMessage(`{"type":"dictionary_slice"}`),
+		KeyspaceContract: json.RawMessage(`{"type":"future_contract_kind"}`),
 		Skip:             0,
 		Limit:            1,
 	})
@@ -667,6 +688,313 @@ func TestSchedulerTransitionToWPAAuditReportsInvalidKeyspaceContract(t *testing.
 	}
 	if result.Status != "invalid_keyspace_contract" {
 		t.Fatalf("expected invalid_keyspace_contract, got %q", result.Status)
+	}
+}
+
+func TestSchedulerTransitionToWPAAuditReportsInvalidDictionaryContract(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:             "job_gpu",
+		JobID:            "job-dict-invalid",
+		HashMode:         22000,
+		Target:           "legacy-target.hc22000",
+		KeyspaceContract: json.RawMessage(`{"type":"dictionary_slice"}`),
+		Skip:             0,
+		Limit:            1,
+	})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "job-dict-invalid"
+	})
+
+	result := pcl.latestResult()
+	if result == nil {
+		t.Fatalf("expected a result message")
+	}
+	if result.Status != "invalid_dictionary_contract" {
+		t.Fatalf("expected invalid_dictionary_contract, got %q", result.Status)
+	}
+	if runner.RunCount() != 0 {
+		t.Fatalf("expected hashcat not to run on invalid dictionary contract")
+	}
+}
+
+func TestSchedulerTransitionToWPAAuditReportsUnsupportedDictionaryFormat(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:     "job_gpu",
+		JobID:    "job-dict-unsupported-format",
+		HashMode: 22000,
+		Target:   "legacy-target.hc22000",
+		Dictionary: &pool.DictionarySpec{
+			DictID:         "bt2024",
+			DictURL:        "https://update.xfo.network/dicts/bt2024.txt.lzma",
+			CompressFormat: "xz",
+			Checksum:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		KeyspaceContract: json.RawMessage(`{"type":"dictionary_slice"}`),
+		Skip:             0,
+		Limit:            1,
+	})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "job-dict-unsupported-format"
+	})
+
+	result := pcl.latestResult()
+	if result == nil {
+		t.Fatalf("expected a result message")
+	}
+	if result.Status != "unsupported_dictionary_format" {
+		t.Fatalf("expected unsupported_dictionary_format, got %q", result.Status)
+	}
+	if runner.RunCount() != 0 {
+		t.Fatalf("expected hashcat not to run on unsupported dictionary format")
+	}
+}
+
+func TestSchedulerTransitionToWPAAuditReportsDictionaryCacheResolveFailed(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+	s.dictionaryCache = &mockDictionaryCache{ensure: func(_ context.Context, _ DictionaryCacheSpec) (DictionaryCacheResult, error) {
+		return DictionaryCacheResult{Materialized: false}, nil
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:     "job_gpu",
+		JobID:    "job-dict-cache-not-ready",
+		HashMode: 22000,
+		Target:   "legacy-target.hc22000",
+		Dictionary: &pool.DictionarySpec{
+			DictID:         "bt2024",
+			DictURL:        "https://update.xfo.network/dicts/bt2024.txt.lzma",
+			CompressFormat: "lzma",
+			Checksum:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		KeyspaceContract: json.RawMessage(`{"type":"dictionary_slice"}`),
+		Skip:             0,
+		Limit:            1,
+	})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "job-dict-cache-not-ready"
+	})
+
+	result := pcl.latestResult()
+	if result == nil {
+		t.Fatalf("expected a result message")
+	}
+	if result.Status != "dictionary_cache_resolve_failed" {
+		t.Fatalf("expected dictionary_cache_resolve_failed, got %q", result.Status)
+	}
+	if runner.RunCount() != 0 {
+		t.Fatalf("expected hashcat not to run before dictionary runtime materialization")
+	}
+}
+
+func TestSchedulerTransitionToWPAAuditReportsDictionaryChecksumMismatch(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+	s.dictionaryCache = &mockDictionaryCache{ensure: func(_ context.Context, _ DictionaryCacheSpec) (DictionaryCacheResult, error) {
+		return DictionaryCacheResult{}, ErrDictionaryChecksumMismatch
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:     "job_gpu",
+		JobID:    "job-dict-checksum-mismatch",
+		HashMode: 22000,
+		Target:   "legacy-target.hc22000",
+		Dictionary: &pool.DictionarySpec{
+			DictID:         "bt2024",
+			DictURL:        "https://update.xfo.network/dicts/bt2024.txt.lzma",
+			CompressFormat: "lzma",
+			Checksum:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		KeyspaceContract: json.RawMessage(`{"type":"dictionary_slice"}`),
+		Skip:             0,
+		Limit:            1,
+	})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "job-dict-checksum-mismatch"
+	})
+
+	result := pcl.latestResult()
+	if result == nil {
+		t.Fatalf("expected a result message")
+	}
+	if result.Status != "dictionary_checksum_mismatch" {
+		t.Fatalf("expected dictionary_checksum_mismatch, got %q", result.Status)
+	}
+	if runner.RunCount() != 0 {
+		t.Fatalf("expected hashcat not to run on dictionary checksum mismatch")
+	}
+}
+
+func TestSchedulerTransitionToWPAAuditReportsDictionaryDiskSpaceInsufficient(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+	s.dictionaryCache = &mockDictionaryCache{ensure: func(_ context.Context, _ DictionaryCacheSpec) (DictionaryCacheResult, error) {
+		return DictionaryCacheResult{}, ErrDictionaryDiskSpaceInsufficient
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:     "job_gpu",
+		JobID:    "job-dict-disk-insufficient",
+		HashMode: 22000,
+		Target:   "legacy-target.hc22000",
+		Dictionary: &pool.DictionarySpec{
+			DictID:         "bt2024",
+			DictURL:        "https://update.xfo.network/dicts/bt2024.txt.lzma",
+			CompressFormat: "lzma",
+			Checksum:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		KeyspaceContract: json.RawMessage(`{"type":"dictionary_slice"}`),
+		Skip:             0,
+		Limit:            1,
+	})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "job-dict-disk-insufficient"
+	})
+
+	result := pcl.latestResult()
+	if result == nil {
+		t.Fatalf("expected a result message")
+	}
+	if result.Status != "dictionary_disk_space_insufficient" {
+		t.Fatalf("expected dictionary_disk_space_insufficient, got %q", result.Status)
+	}
+	if runner.RunCount() != 0 {
+		t.Fatalf("expected hashcat not to run on dictionary disk preflight failure")
+	}
+}
+
+func TestSchedulerTransitionToWPAAuditReportsDictionarySizeQuotaExceeded(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+	s.dictionaryCache = &mockDictionaryCache{ensure: func(_ context.Context, _ DictionaryCacheSpec) (DictionaryCacheResult, error) {
+		return DictionaryCacheResult{}, ErrDictionarySizeQuotaExceeded
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:     "job_gpu",
+		JobID:    "job-dict-size-quota-exceeded",
+		HashMode: 22000,
+		Target:   "legacy-target.hc22000",
+		Dictionary: &pool.DictionarySpec{
+			DictID:         "bt2024",
+			DictURL:        "https://update.xfo.network/dicts/bt2024.txt.lzma",
+			CompressFormat: "lzma",
+			Checksum:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		KeyspaceContract: json.RawMessage(`{"type":"dictionary_slice"}`),
+		Skip:             0,
+		Limit:            1,
+	})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "job-dict-size-quota-exceeded"
+	})
+
+	result := pcl.latestResult()
+	if result == nil {
+		t.Fatalf("expected a result message")
+	}
+	if result.Status != "dictionary_size_quota_exceeded" {
+		t.Fatalf("expected dictionary_size_quota_exceeded, got %q", result.Status)
+	}
+	if runner.RunCount() != 0 {
+		t.Fatalf("expected hashcat not to run on dictionary extraction quota failure")
+	}
+}
+
+func TestSchedulerTransitionToWPAAuditInjectsDictionaryRuntimePath(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+	s.dictionaryCache = &mockDictionaryCache{ensure: func(_ context.Context, _ DictionaryCacheSpec) (DictionaryCacheResult, error) {
+		return DictionaryCacheResult{DictPath: "/tmp/xfo-miner/dicts/bt2024.txt", Materialized: true}, nil
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:     "job_gpu",
+		JobID:    "job-dict-runtime-path",
+		HashMode: 22000,
+		Target:   "legacy-target.hc22000",
+		Dictionary: &pool.DictionarySpec{
+			DictID:         "bt2024",
+			DictURL:        "https://update.xfo.network/dicts/bt2024.txt.lzma",
+			CompressFormat: "lzma",
+			Checksum:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			LineCount:      100,
+		},
+		KeyspaceContract: json.RawMessage(`{"type":"dictionary_slice"}`),
+		Skip:             3,
+		Limit:            7,
+	})
+
+	waitFor(t, func() bool { return runner.RunCount() >= 1 })
+	if got := runner.LastDictionaryRuntimePath(); got != "/tmp/xfo-miner/dicts/bt2024.txt" {
+		t.Fatalf("expected dictionary runtime path to be injected, got %q", got)
 	}
 }
 

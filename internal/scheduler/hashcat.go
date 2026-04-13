@@ -51,7 +51,7 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 		"limit", job.Limit,
 		"has_keyspace_contract", len(job.KeyspaceContract) > 0,
 	)
-	keyspace, err := materializeKeyspaceContract(job.JobID, job.KeyspaceContract, job.Skip, job.Limit)
+	keyspace, err := materializeKeyspaceContract(job.JobID, job.Dictionary, job.KeyspaceContract, job.Skip, job.Limit)
 	if err != nil {
 		r.logger.Error("[hashcat] materializeKeyspaceContract failed", "job_id", job.JobID, "error", err)
 		if errors.Is(err, ErrInvalidKeyspaceContract) || errors.Is(err, ErrUnsupportedKeyspaceContract) || errors.Is(err, ErrCandidateMaterializationFailed) {

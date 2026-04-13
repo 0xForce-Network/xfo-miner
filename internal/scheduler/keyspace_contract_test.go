@@ -4,10 +4,12 @@ import (
 	"errors"
 	"os"
 	"testing"
+
+	"github.com/0xforce/xfo-miner/internal/pool"
 )
 
 func TestMaterializeKeyspaceContractWithoutContractKeepsFallbackRange(t *testing.T) {
-	materialized, err := materializeKeyspaceContract("job-plain", nil, 12, 34)
+	materialized, err := materializeKeyspaceContract("job-plain", nil, nil, 12, 34)
 	if err != nil {
 		t.Fatalf("materializeKeyspaceContract() error = %v", err)
 	}
@@ -24,7 +26,7 @@ func TestMaterializeKeyspaceContractWithoutContractKeepsFallbackRange(t *testing
 
 func TestMaterializeKeyspaceContractFixedCandidateList(t *testing.T) {
 	raw := []byte(`{"type":"fixed_candidate_list","candidates":["000000000000","123123456456","999999999999"]}`)
-	materialized, err := materializeKeyspaceContract("job-fixed", raw, 0, 3)
+	materialized, err := materializeKeyspaceContract("job-fixed", nil, raw, 0, 3)
 	if err != nil {
 		t.Fatalf("materializeKeyspaceContract() error = %v", err)
 	}
@@ -53,7 +55,7 @@ func TestMaterializeKeyspaceContractFixedCandidateList(t *testing.T) {
 
 func TestMaterializeKeyspaceContractFixedCandidateListOverridesFallbackRange(t *testing.T) {
 	raw := []byte(`{"type":"fixed_candidate_list","candidates":["abc","def","ghi"]}`)
-	materialized, err := materializeKeyspaceContract("job-fixed-override", raw, 100, 0)
+	materialized, err := materializeKeyspaceContract("job-fixed-override", nil, raw, 100, 0)
 	if err != nil {
 		t.Fatalf("materializeKeyspaceContract() error = %v", err)
 	}
@@ -72,7 +74,7 @@ func TestMaterializeKeyspaceContractFixedCandidateListOverridesFallbackRange(t *
 
 func TestMaterializeKeyspaceContractMaskSegmentOverrideRange(t *testing.T) {
 	raw := []byte(`{"type":"mask_segment","mask":"?d?d?d?d","skip":5,"limit":12}`)
-	materialized, err := materializeKeyspaceContract("job-mask", raw, 1, 2)
+	materialized, err := materializeKeyspaceContract("job-mask", nil, raw, 1, 2)
 	if err != nil {
 		t.Fatalf("materializeKeyspaceContract() error = %v", err)
 	}
@@ -89,7 +91,55 @@ func TestMaterializeKeyspaceContractMaskSegmentOverrideRange(t *testing.T) {
 
 func TestMaterializeKeyspaceContractRejectsInvalidFixedCandidateList(t *testing.T) {
 	raw := []byte(`{"type":"fixed_candidate_list","candidates":["", "ok"]}`)
-	_, err := materializeKeyspaceContract("job-invalid", raw, 0, 1)
+	_, err := materializeKeyspaceContract("job-invalid", nil, raw, 0, 1)
+	if !errors.Is(err, ErrInvalidKeyspaceContract) {
+		t.Fatalf("expected ErrInvalidKeyspaceContract, got %v", err)
+	}
+}
+
+func TestMaterializeKeyspaceContractDictionarySliceUsesRuntimePath(t *testing.T) {
+	raw := []byte(`{"type":"dictionary_slice"}`)
+	dict := &pool.DictionarySpec{RuntimePath: "/tmp/xfo-miner/dicts/bt2024.txt"}
+
+	materialized, err := materializeKeyspaceContract("job-dict", dict, raw, 15, 31)
+	if err != nil {
+		t.Fatalf("materializeKeyspaceContract() error = %v", err)
+	}
+	if materialized.AttackMode == nil || *materialized.AttackMode != 0 {
+		t.Fatalf("expected attack mode 0 for dictionary_slice")
+	}
+	if len(materialized.Inputs) != 1 || materialized.Inputs[0] != "/tmp/xfo-miner/dicts/bt2024.txt" {
+		t.Fatalf("unexpected dictionary inputs: %v", materialized.Inputs)
+	}
+	if materialized.Skip != 15 || materialized.Limit != 31 {
+		t.Fatalf("expected fallback skip/limit to be preserved for dictionary_slice, got skip=%d limit=%d", materialized.Skip, materialized.Limit)
+	}
+}
+
+func TestMaterializeKeyspaceContractDictionarySliceOverrideRange(t *testing.T) {
+	raw := []byte(`{"type":"dictionary_slice","skip":7,"limit":19}`)
+	dict := &pool.DictionarySpec{RuntimePath: "/tmp/xfo-miner/dicts/bt2024.txt"}
+
+	materialized, err := materializeKeyspaceContract("job-dict-range", dict, raw, 1, 2)
+	if err != nil {
+		t.Fatalf("materializeKeyspaceContract() error = %v", err)
+	}
+	if materialized.Skip != 7 || materialized.Limit != 19 {
+		t.Fatalf("expected dictionary_slice range override, got skip=%d limit=%d", materialized.Skip, materialized.Limit)
+	}
+}
+
+func TestMaterializeKeyspaceContractDictionarySliceRejectsMissingRuntimePath(t *testing.T) {
+	raw := []byte(`{"type":"dictionary_slice"}`)
+	_, err := materializeKeyspaceContract("job-dict-missing-path", &pool.DictionarySpec{}, raw, 0, 1)
+	if !errors.Is(err, ErrCandidateMaterializationFailed) {
+		t.Fatalf("expected ErrCandidateMaterializationFailed, got %v", err)
+	}
+}
+
+func TestMaterializeKeyspaceContractDictionarySliceRejectsMissingDictionaryPayload(t *testing.T) {
+	raw := []byte(`{"type":"dictionary_slice"}`)
+	_, err := materializeKeyspaceContract("job-dict-missing-payload", nil, raw, 0, 1)
 	if !errors.Is(err, ErrInvalidKeyspaceContract) {
 		t.Fatalf("expected ErrInvalidKeyspaceContract, got %v", err)
 	}
@@ -97,12 +147,11 @@ func TestMaterializeKeyspaceContractRejectsInvalidFixedCandidateList(t *testing.
 
 func TestMaterializeKeyspaceContractRejectsUnsupportedTypes(t *testing.T) {
 	tests := []string{
-		`{"type":"dictionary_slice","dictionary_url":"https://pool/artifacts/dict.txt"}`,
 		`{"type":"deterministic_range","start":1,"end":32}`,
 	}
 
 	for _, raw := range tests {
-		_, err := materializeKeyspaceContract("job-unsupported", []byte(raw), 0, 1)
+		_, err := materializeKeyspaceContract("job-unsupported", nil, []byte(raw), 0, 1)
 		if !errors.Is(err, ErrUnsupportedKeyspaceContract) {
 			t.Fatalf("expected ErrUnsupportedKeyspaceContract for raw=%s, got %v", raw, err)
 		}
