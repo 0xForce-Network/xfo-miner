@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/ulikunitz/xz/lzma"
@@ -170,14 +169,6 @@ func (c *DictionaryCache) Ensure(ctx context.Context, spec DictionaryCacheSpec) 
 	}
 
 	return DictionaryCacheResult{DictPath: dictPath, MetadataPath: metadataPath, BlobPath: blobPath, Materialized: true}, nil
-}
-
-func statAvailableBytes(path string) (uint64, error) {
-	var fs syscall.Statfs_t
-	if err := syscall.Statfs(path, &fs); err != nil {
-		return 0, err
-	}
-	return fs.Bavail * uint64(fs.Bsize), nil
 }
 
 func (c *DictionaryCache) ensureDiskAvailable(path string) error {
