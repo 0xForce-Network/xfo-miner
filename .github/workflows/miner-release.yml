@@ -51,6 +51,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          DEFAULT_MIN_VERSION="0.1.0"
+          DEFAULT_RELEASE_NOTES="Automated miner release"
+
           INPUT_VERSION="${{ github.event.inputs.version }}"
           if [[ -n "${INPUT_VERSION}" ]]; then
             RAW_VERSION="${INPUT_VERSION}"
@@ -66,10 +69,33 @@ jobs:
           PREFIX="releases/${RELEASE_TAG}"
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
+          INPUT_MIN_VERSION="${{ github.event.inputs.min_version }}"
+          if [[ -n "${INPUT_MIN_VERSION}" ]]; then
+            MIN_VERSION="${INPUT_MIN_VERSION}"
+          else
+            MIN_VERSION="${DEFAULT_MIN_VERSION}"
+          fi
+
+          INPUT_RELEASE_NOTES="${{ github.event.inputs.release_notes }}"
+          RELEASE_BODY="${{ github.event.release.body }}"
+          if [[ -n "${INPUT_RELEASE_NOTES}" ]]; then
+            RELEASE_NOTES="${INPUT_RELEASE_NOTES}"
+          elif [[ -n "${RELEASE_BODY}" ]]; then
+            RELEASE_NOTES="${RELEASE_BODY}"
+          else
+            RELEASE_NOTES="${DEFAULT_RELEASE_NOTES}"
+          fi
+
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "prefix=${PREFIX}" >> "$GITHUB_OUTPUT"
           echo "endpoint=${ENDPOINT}" >> "$GITHUB_OUTPUT"
+          echo "min_version=${MIN_VERSION}" >> "$GITHUB_OUTPUT"
+          {
+            echo "release_notes<<EOF"
+            printf '%s\n' "${RELEASE_NOTES}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and package binaries
         shell: bash
@@ -118,12 +144,6 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
           PREFIX="${{ steps.meta.outputs.prefix }}"
-          RELEASE_NOTES="${{ github.event.inputs.release_notes }}"
-          MIN_VERSION="${{ github.event.inputs.min_version }}"
-
-          if [[ -z "${RELEASE_NOTES}" ]]; then
-            RELEASE_NOTES="Automated miner release"
-          fi
 
           node <<'NODE'
           const fs = require('fs');
@@ -166,8 +186,8 @@ jobs:
           NODE
         env:
           VERSION: ${{ steps.meta.outputs.version }}
-          MIN_VERSION: ${{ github.event.inputs.min_version }}
-          RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
+          MIN_VERSION: ${{ steps.meta.outputs.min_version }}
+          RELEASE_NOTES: ${{ steps.meta.outputs.release_notes }}
           PREFIX: ${{ steps.meta.outputs.prefix }}
 
       - name: Upload release artifacts to R2
@@ -207,7 +227,7 @@ jobs:
         with:
           tag_name: ${{ steps.meta.outputs.release_tag }}
           name: xfo-miner ${{ steps.meta.outputs.release_tag }}
-          body: ${{ github.event.inputs.release_notes || 'Automated miner release' }}
+          body: ${{ steps.meta.outputs.release_notes }}
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
