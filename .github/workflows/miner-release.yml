@@ -7,8 +7,6 @@ on:
   push:
     tags:
       - 'v*'
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       version:
@@ -26,6 +24,10 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+
+    concurrency:
+      group: miner-release-${{ github.ref_name || github.event.inputs.version || github.run_id }}
+      cancel-in-progress: true
 
     env:
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -112,6 +114,7 @@ jobs:
             local PLATFORM_KEY="${GOOS}-${GOARCH}"
             local BIN_NAME="xfo-miner"
             local RAW_BIN="dist/${BIN_NAME}-${PLATFORM_KEY}"
+            local ARCHIVE_EPOCH="1970-01-01 00:00:00Z"
 
             if [[ "${GOOS}" == "windows" ]]; then
               RAW_BIN+=".exe"
@@ -123,12 +126,20 @@ jobs:
               -o "${RAW_BIN}" \
               ./cmd/xfo-miner
 
+            touch -d "${ARCHIVE_EPOCH}" "${RAW_BIN}"
+
             if [[ "${GOOS}" == "windows" ]]; then
               local ARCHIVE="xfo-miner-${PLATFORM_KEY}.zip"
-              (cd dist && zip -q -j "packages/${ARCHIVE}" "$(basename "${RAW_BIN}")")
+              (cd dist && zip -X -q -j "packages/${ARCHIVE}" "$(basename "${RAW_BIN}")")
             else
               local ARCHIVE="xfo-miner-${PLATFORM_KEY}.tar.gz"
-              (cd dist && tar -czf "packages/${ARCHIVE}" "$(basename "${RAW_BIN}")")
+              (cd dist && tar \
+                --sort=name \
+                --mtime="${ARCHIVE_EPOCH}" \
+                --owner=0 \
+                --group=0 \
+                --numeric-owner \
+                -czf "packages/${ARCHIVE}" "$(basename "${RAW_BIN}")")
             fi
           }
 
@@ -206,6 +217,7 @@ jobs:
           aws s3 cp dist/packages "s3://${R2_BUCKET}/${PREFIX}/" \
             --recursive \
             --endpoint-url "${ENDPOINT}" \
+            --cache-control "no-store" \
             --only-show-errors
 
           aws s3 cp dist/latest.json "s3://${R2_BUCKET}/releases/latest.json" \
