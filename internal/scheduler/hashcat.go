@@ -131,7 +131,6 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 			defer stderrWg.Done()
 			scanErr := process.ScanLines(proc.Stderr, func(line string) {
 				stderrLineCount++
-				r.logger.Debug("hashcat stderr", "job_id", job.JobID, "line", line)
 			})
 			r.logger.Info("[hashcat] stderr drain finished",
 				"job_id", job.JobID,
@@ -151,7 +150,6 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 		r.logger.Info("[hashcat] starting stdout scan", "job_id", job.JobID)
 		stdoutScanErr := process.ScanLines(proc.Stdout, func(line string) {
 			stdoutLineCount++
-			r.logger.Debug("[hashcat] stdout line", "job_id", job.JobID, "line_num", stdoutLineCount, "line", line)
 			if msg, ok := parseProgressLine(line, job.JobID); ok && onProgress != nil {
 				onProgress(msg)
 			}
@@ -185,7 +183,7 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 	r.logger.Info("[hashcat] stderr wg done", "job_id", job.JobID)
 
 	stopErr := r.procManager.Stop(context.Background(), procName, 1*time.Second)
-	r.logger.Debug("[hashcat] procManager.Stop returned", "job_id", job.JobID, "stop_err", stopErr)
+	r.logger.Info("[hashcat] procManager.Stop returned", "job_id", job.JobID, "stop_err", stopErr)
 
 	if resultBytes, readErr := os.ReadFile(resultPath); readErr == nil {
 		resultContent := strings.TrimSpace(string(resultBytes))
