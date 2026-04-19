@@ -234,6 +234,53 @@ jobs:
             dist/packages/*
             dist/latest.json
 
+      - name: Purge public CDN cache for release paths
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" || -z "${CLOUDFLARE_ZONE_ID:-}" ]]; then
+            echo "CLOUDFLARE_API_TOKEN and CLOUDFLARE_ZONE_ID are required to purge CDN cache" >&2
+            exit 1
+          fi
+
+          release_tag="${{ steps.meta.outputs.release_tag }}"
+          urls=(
+            "https://update.xfo.network/releases/latest.json"
+            "https://update.xfo.network/releases/${release_tag}/xfo-miner-linux-amd64.tar.gz"
+            "https://update.xfo.network/releases/${release_tag}/xfo-miner-linux-arm64.tar.gz"
+            "https://update.xfo.network/releases/${release_tag}/xfo-miner-windows-amd64.zip"
+            "https://update.xfo.network/releases/${release_tag}/xfo-miner-darwin-amd64.tar.gz"
+            "https://update.xfo.network/releases/${release_tag}/xfo-miner-darwin-arm64.tar.gz"
+          )
+          purge_response="${RUNNER_TEMP}/cloudflare-purge-response.json"
+
+          export PURGE_URLS
+          PURGE_URLS="$(printf '%s\n' "${urls[@]}")"
+          purge_payload="$(python3 -c 'import json, os; print(json.dumps({"files": os.environ["PURGE_URLS"].splitlines()}))')"
+
+          echo "Purging Cloudflare cache for public release URLs"
+          curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 60 \
+            -X POST "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "${purge_payload}" \
+            -o "${purge_response}"
+
+          python3 - <<'PY' "${purge_response}"
+          import json
+          import sys
+          from pathlib import Path
+
+          response_path = Path(sys.argv[1])
+          payload = json.loads(response_path.read_text(encoding='utf-8'))
+          if not payload.get('success'):
+              raise SystemExit(f"Cloudflare cache purge failed: {json.dumps(payload, ensure_ascii=False)}")
+          PY
+
       - name: Validate public release surface
         shell: bash
         run: |
