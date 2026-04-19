@@ -6,18 +6,23 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/0xforce/xfo-miner/internal/config"
 	"github.com/0xforce/xfo-miner/internal/env"
+	"github.com/0xforce/xfo-miner/internal/forensic"
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
 	"github.com/0xforce/xfo-miner/internal/telemetry"
 	"github.com/0xforce/xfo-miner/internal/updater"
+	"github.com/gorilla/websocket"
 )
 
 type mockProcessManager struct {
@@ -124,6 +129,7 @@ type mockPoolClient struct {
 	connected  bool
 	lastLogin  *pool.LoginMessage
 	results    []pool.ResultMessage
+	probeResults []pool.ProbeResultMessage
 	connectErr error
 	loginErr   error
 	connects   int
@@ -163,6 +169,14 @@ func (m *mockPoolClient) SendResult(result *pool.ResultMessage) error {
 	defer m.mu.Unlock()
 	if result != nil {
 		m.results = append(m.results, *result)
+	}
+	return nil
+}
+func (m *mockPoolClient) SendProbeResult(result *pool.ProbeResultMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if result != nil {
+		m.probeResults = append(m.probeResults, *result)
 	}
 	return nil
 }
@@ -232,6 +246,27 @@ func (m *mockPoolClient) latestResult() *pool.ResultMessage {
 	}
 	copy := m.results[len(m.results)-1]
 	return &copy
+}
+
+func (m *mockPoolClient) latestProbeResult() *pool.ProbeResultMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.probeResults) == 0 {
+		return nil
+	}
+	copy := m.probeResults[len(m.probeResults)-1]
+	return &copy
+}
+
+type mockForensicSandbox struct {
+	handle func(ctx context.Context, payload []byte, challengeID string) (*forensic.ProbeExecutionResult, error)
+}
+
+func (m *mockForensicSandbox) HandleServerProbe(ctx context.Context, payload []byte, challengeID string) (*forensic.ProbeExecutionResult, error) {
+	if m.handle != nil {
+		return m.handle(ctx, payload, challengeID)
+	}
+	return &forensic.ProbeExecutionResult{ChallengeID: challengeID, Status: "OK", Data: "handled"}, nil
 }
 
 type mockHashcatRunner struct{}
@@ -519,6 +554,74 @@ func waitFor(t *testing.T, fn func() bool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("condition not met before timeout")
+}
+
+func schedulerTestWSURL(httpURL string) string {
+	return "ws" + strings.TrimPrefix(httpURL, "http")
+}
+
+func newRuntimeProbeScheduler(t *testing.T, poolURL string, poolClient pool.Client) (*Scheduler, *mockDetachedController) {
+	t.Helper()
+
+	proc := newMockProcessManager()
+	detached := newMockDetachedController()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	s := New(&config.Config{
+		NodeID:            "node-runtime-1",
+		WalletAddress:     "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
+		WorkerName:        "worker-runtime-1",
+		PoolURL:           poolURL,
+		HostPlatformID:    "host-runtime-1",
+		PersistentMinerID: "miner-runtime-1",
+		IdentityMode:      "stable",
+		AutoUpdate:        config.AutoUpdateConfig{Enabled: false},
+		CPUMining: config.CPUMiningConfig{
+			Enabled:           false,
+			XMRigPath:         "./bin/xmrig",
+			MaxThreads:        2,
+			BackgroundThreads: 1,
+		},
+		IdleBehavior: config.IdleBehavior{
+			Enabled:        true,
+			GracePeriodSec: 1,
+			Command:        "idle-miner",
+			Args:           "--x",
+		},
+	}, "0.1.0-test", &env.SystemCapabilities{RunMode: env.RunModeCPUOnly}, proc, poolClient, logger)
+
+	s.startDetached = detached.start
+	s.stopDetached = detached.stop
+	s.isDetachedAlive = detached.alive
+	s.hashcatRunner = &mockHashcatRunner{}
+	s.containerRunner = &mockContainerRunner{}
+	s.updater = &mockOTAUpdater{}
+	s.newPoller = func(_ updater.Version, _ func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
+		return &mockOTAPoller{}
+	}
+	s.scanGPUs = func() ([]telemetry.GPUDevice, error) {
+		return []telemetry.GPUDevice{ {
+			DeviceID:          "0",
+			DeviceIndex:       0,
+			VendorID:          "10de",
+			UUIDSource:        "opencl_uuid_khr",
+			GPUUUID:           "runtime-gpu-uuid",
+			DeviceFingerprint: "runtime-fp",
+			GPUModel:          "RTX",
+			PCIBusID:          "0000:01:00.0",
+		} }, nil
+	}
+
+	sandbox, err := forensic.NewForensicSandbox(context.Background(), logger)
+	if err != nil {
+		t.Fatalf("NewForensicSandbox() error = %v", err)
+	}
+	s.forensicSandbox = sandbox
+	t.Cleanup(func() {
+		_ = sandbox.Close(context.Background())
+	})
+
+	return s, detached
 }
 
 func TestSchedulerStartsInStandby(t *testing.T) {
@@ -1083,6 +1186,384 @@ func TestSchedulerTransitionToAIContainer(t *testing.T) {
 
 	pcl.emit(pool.JobContainerMessage{Type: "job_container", JobID: "job2", Image: "img", TargetPort: 8080})
 	waitFor(t, func() bool { return detached.stopCount() >= 1 })
+}
+
+func TestSchedulerSendProbeRejectsMissingChallengeID(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.SendProbeMessage{Type: "send_probe", Payload: []byte{0x00, 0x61, 0x73, 0x6d, 0x01}})
+
+	waitFor(t, func() bool {
+		msg := pcl.latestProbeResult()
+		return msg != nil && msg.ErrorCode == "invalid_probe_contract"
+	})
+
+	msg := pcl.latestProbeResult()
+	if msg == nil {
+		t.Fatalf("expected probe_result for missing challenge_id")
+	}
+	if msg.Status != "REJECTED" {
+		t.Fatalf("expected REJECTED status, got %q", msg.Status)
+	}
+}
+
+func TestSchedulerSendProbeRejectsInvalidWASMPayload(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.SendProbeMessage{Type: "send_probe", ChallengeID: "probe-1", Payload: []byte{0x01, 0x02}})
+
+	waitFor(t, func() bool {
+		msg := pcl.latestProbeResult()
+		return msg != nil && msg.ChallengeID == "probe-1"
+	})
+
+	msg := pcl.latestProbeResult()
+	if msg == nil {
+		t.Fatalf("expected probe_result for invalid wasm payload")
+	}
+	if msg.ErrorCode != "probe_payload_invalid" {
+		t.Fatalf("expected probe_payload_invalid, got %q", msg.ErrorCode)
+	}
+}
+
+func TestSchedulerSendProbeRejectsUnavailableSandbox(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.forensicSandbox = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.SendProbeMessage{Type: "send_probe", ChallengeID: "probe-2", Payload: []byte{0x00, 0x61, 0x73, 0x6d, 0x01}})
+
+	waitFor(t, func() bool {
+		msg := pcl.latestProbeResult()
+		return msg != nil && msg.ChallengeID == "probe-2"
+	})
+
+	msg := pcl.latestProbeResult()
+	if msg == nil {
+		t.Fatalf("expected probe_result for unavailable sandbox")
+	}
+	if msg.ErrorCode != "forensic_sandbox_unavailable" {
+		t.Fatalf("expected forensic_sandbox_unavailable, got %q", msg.ErrorCode)
+	}
+}
+
+func TestSchedulerSendProbeDispatchesToSandbox(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.forensicSandbox = &mockForensicSandbox{handle: func(_ context.Context, payload []byte, challengeID string) (*forensic.ProbeExecutionResult, error) {
+		if challengeID != "probe-3" {
+			t.Fatalf("unexpected challengeID: %q", challengeID)
+		}
+		if len(payload) == 0 {
+			t.Fatalf("expected non-empty payload")
+		}
+		return &forensic.ProbeExecutionResult{ChallengeID: challengeID, Status: "OK", Data: "sandbox-handled"}, nil
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.SendProbeMessage{Type: "send_probe", ChallengeID: "probe-3", Payload: []byte{0x00, 0x61, 0x73, 0x6d, 0x01}})
+
+	waitFor(t, func() bool {
+		msg := pcl.latestProbeResult()
+		return msg != nil && msg.ChallengeID == "probe-3" && msg.Status == "OK"
+	})
+
+	msg := pcl.latestProbeResult()
+	if msg == nil {
+		t.Fatalf("expected probe_result")
+	}
+	if msg.Result != "sandbox-handled" {
+		t.Fatalf("expected sandbox-handled result, got %q", msg.Result)
+	}
+	if msg.ErrorCode != "" {
+		t.Fatalf("expected empty error_code, got %q", msg.ErrorCode)
+	}
+}
+
+func TestSchedulerSendProbeMapsSandboxErrorCode(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.forensicSandbox = &mockForensicSandbox{handle: func(_ context.Context, _ []byte, challengeID string) (*forensic.ProbeExecutionResult, error) {
+		return &forensic.ProbeExecutionResult{
+			ChallengeID: challengeID,
+			Status:      "FAILED",
+			ErrorCode:   "probe_execution_trapped",
+			ErrorDetail: "wasm trap: unreachable",
+		}, forensic.ErrProbeExecutionTrapped
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.SendProbeMessage{Type: "send_probe", ChallengeID: "probe-4", Payload: []byte{0x00, 0x61, 0x73, 0x6d, 0x01}})
+
+	waitFor(t, func() bool {
+		msg := pcl.latestProbeResult()
+		return msg != nil && msg.ChallengeID == "probe-4"
+	})
+
+	msg := pcl.latestProbeResult()
+	if msg == nil {
+		t.Fatalf("expected probe_result")
+	}
+	if msg.Status != "FAILED" {
+		t.Fatalf("expected FAILED status, got %q", msg.Status)
+	}
+	if msg.ErrorCode != "probe_execution_trapped" {
+		t.Fatalf("expected probe_execution_trapped, got %q", msg.ErrorCode)
+	}
+	if msg.Result != "wasm trap: unreachable" {
+		t.Fatalf("expected trap detail result, got %q", msg.Result)
+	}
+}
+
+func TestSchedulerSendProbeRuntimeOverWebSocketHappyPath(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	probeResultCh := make(chan pool.ProbeResultMessage, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		for {
+			_, payload, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(payload, &envelope) != nil {
+				continue
+			}
+			if envelope.Type == "login" {
+				break
+			}
+		}
+
+		if err := conn.WriteJSON(pool.SendProbeMessage{
+			Type:        "send_probe",
+			ChallengeID: "runtime-probe-199-ok",
+			Payload:     wasmProbeMainUsesChallengeBridgeRuntime,
+		}); err != nil {
+			return
+		}
+
+		for {
+			_, payload, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(payload, &envelope) != nil || envelope.Type != "probe_result" {
+				continue
+			}
+
+			var result pool.ProbeResultMessage
+			if json.Unmarshal(payload, &result) == nil {
+				select {
+				case probeResultCh <- result:
+				default:
+				}
+			}
+			return
+		}
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	poolClient := pool.NewWSSClient(logger, pool.WithHeartbeatInterval(time.Hour), pool.WithPingInterval(time.Hour))
+	s, detached := newRuntimeProbeScheduler(t, schedulerTestWSURL(server.URL), poolClient)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(ctx) }()
+
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	select {
+	case msg := <-probeResultCh:
+		if msg.Type != "probe_result" {
+			t.Fatalf("expected probe_result type, got %q", msg.Type)
+		}
+		if msg.ChallengeID != "runtime-probe-199-ok" {
+			t.Fatalf("expected challenge_id passthrough, got %q", msg.ChallengeID)
+		}
+		if msg.Status != "OK" {
+			t.Fatalf("expected OK status, got %q", msg.Status)
+		}
+		if msg.Result != "OK" {
+			t.Fatalf("expected OK result payload, got %q", msg.Result)
+		}
+		if msg.ErrorCode != "" {
+			t.Fatalf("expected empty error_code, got %q", msg.ErrorCode)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatalf("timeout waiting probe_result from runtime websocket flow")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Run() did not exit after context cancel")
+	}
+}
+
+func TestSchedulerSendProbeRuntimeOverWebSocketRejectsInvalidPayload(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	probeResultCh := make(chan pool.ProbeResultMessage, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		for {
+			_, payload, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(payload, &envelope) != nil {
+				continue
+			}
+			if envelope.Type == "login" {
+				break
+			}
+		}
+
+		if err := conn.WriteJSON(pool.SendProbeMessage{
+			Type:        "send_probe",
+			ChallengeID: "runtime-probe-199-invalid",
+			Payload:     []byte{0x01, 0x02, 0x03},
+		}); err != nil {
+			return
+		}
+
+		for {
+			_, payload, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var envelope struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(payload, &envelope) != nil || envelope.Type != "probe_result" {
+				continue
+			}
+
+			var result pool.ProbeResultMessage
+			if json.Unmarshal(payload, &result) == nil {
+				select {
+				case probeResultCh <- result:
+				default:
+				}
+			}
+			return
+		}
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	poolClient := pool.NewWSSClient(logger, pool.WithHeartbeatInterval(time.Hour), pool.WithPingInterval(time.Hour))
+	s, detached := newRuntimeProbeScheduler(t, schedulerTestWSURL(server.URL), poolClient)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(ctx) }()
+
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	select {
+	case msg := <-probeResultCh:
+		if msg.ChallengeID != "runtime-probe-199-invalid" {
+			t.Fatalf("expected challenge_id passthrough, got %q", msg.ChallengeID)
+		}
+		if msg.Status != "REJECTED" {
+			t.Fatalf("expected REJECTED status, got %q", msg.Status)
+		}
+		if msg.ErrorCode != "probe_payload_invalid" {
+			t.Fatalf("expected probe_payload_invalid, got %q", msg.ErrorCode)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatalf("timeout waiting rejected probe_result from runtime websocket flow")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Run() did not exit after context cancel")
+	}
+}
+
+var wasmProbeMainUsesChallengeBridgeRuntime = []byte{
+	0x00, 0x61, 0x73, 0x6d,
+	0x01, 0x00, 0x00, 0x00,
+	0x01, 0x0b, 0x02,
+	0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+	0x60, 0x00, 0x01, 0x7f,
+	0x02, 0x22, 0x01,
+	0x0c,
+	'x', 'f', 'o', '.', 'f', 'o', 'r', 'e', 'n', 's', 'i', 'c',
+	0x11,
+	'r', 'e', 'a', 'd', '_', 'c', 'h', 'a', 'l', 'l', 'e', 'n', 'g', 'e', '_', 'i', 'd',
+	0x00, 0x00,
+	0x03, 0x02, 0x01, 0x01,
+	0x05, 0x03, 0x01, 0x00, 0x01,
+	0x07, 0x17, 0x02,
+	0x06,
+	'm', 'e', 'm', 'o', 'r', 'y',
+	0x02, 0x00,
+	0x0a,
+	'p', 'r', 'o', 'b', 'e', '_', 'm', 'a', 'i', 'n',
+	0x00, 0x01,
+	0x0a, 0x13, 0x01, 0x11,
+	0x00,
+	0x41, 0x00,
+	0x41, 0x40,
+	0x10, 0x00,
+	0x45,
+	0x04, 0x7f,
+	0x41, 0x01,
+	0x05,
+	0x41, 0x00,
+	0x0b,
+	0x0b,
 }
 
 func TestSchedulerReturnsToStandbyAfterJob(t *testing.T) {

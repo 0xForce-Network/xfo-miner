@@ -21,6 +21,9 @@ func (m *mockTelemetryPoolClient) SendLogin(_ *pool.LoginMessage) error       { 
 func (m *mockTelemetryPoolClient) SendHeartbeat() error                       { return nil }
 func (m *mockTelemetryPoolClient) SendProgress(_ *pool.ProgressMessage) error { return nil }
 func (m *mockTelemetryPoolClient) SendResult(_ *pool.ResultMessage) error     { return nil }
+func (m *mockTelemetryPoolClient) SendProbeResult(_ *pool.ProbeResultMessage) error {
+	return nil
+}
 func (m *mockTelemetryPoolClient) SendContainerReady(_ *pool.ContainerReadyMessage) error {
 	return nil
 }

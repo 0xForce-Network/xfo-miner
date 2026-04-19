@@ -14,6 +14,7 @@ import (
 
 	"github.com/0xforce/xfo-miner/internal/config"
 	"github.com/0xforce/xfo-miner/internal/env"
+	"github.com/0xforce/xfo-miner/internal/forensic"
 	"github.com/0xforce/xfo-miner/internal/identity"
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
@@ -43,6 +44,10 @@ type otaUpdater interface {
 
 type otaPoller interface {
 	Run(context.Context) error
+}
+
+type forensicSandbox interface {
+	HandleServerProbe(ctx context.Context, payload []byte, challengeID string) (*forensic.ProbeExecutionResult, error)
 }
 
 type inboundMessage struct {
@@ -77,6 +82,7 @@ type Scheduler struct {
 	isDetachedAlive func(pid int) bool
 	targetCache     targetCache
 	dictionaryCache dictionaryCache
+	forensicSandbox forensicSandbox
 
 	taskMu        sync.RWMutex
 	activeWPATask bool
@@ -131,6 +137,12 @@ func New(cfg *config.Config, version string, capabilities *env.SystemCapabilitie
 		s.xmrigManager = NewXMRigManager(procManager, &cfg.CPUMining, cfg.CPUMining.StratumURL, cfg.WalletAddress, cfg.NodeID, cfg.WorkerName, logger)
 	} else {
 		s.xmrigManager = NewNoopXMRigManager()
+	}
+
+	if sandbox, err := forensic.NewForensicSandbox(context.Background(), logger); err != nil {
+		s.logger.Warn("forensic sandbox unavailable", "error", err)
+	} else {
+		s.forensicSandbox = sandbox
 	}
 
 	return s
@@ -424,7 +436,93 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 			return
 		}
 		s.handleOTAUpdate(ctx, &ota)
+	case "send_probe":
+		var probe pool.SendProbeMessage
+		if err := json.Unmarshal(msg.raw, &probe); err != nil {
+			s.logger.Warn("invalid send_probe message", "error", err)
+			return
+		}
+		s.handleSendProbe(ctx, &probe)
 	}
+}
+
+func (s *Scheduler) handleSendProbe(ctx context.Context, probe *pool.SendProbeMessage) {
+	if probe == nil {
+		return
+	}
+
+	challengeID := strings.TrimSpace(probe.ChallengeID)
+	if challengeID == "" {
+		s.sendProbeAdmissionFailure("", "invalid_probe_contract", "missing challenge_id")
+		return
+	}
+
+	if len(probe.Payload) == 0 {
+		s.sendProbeAdmissionFailure(challengeID, "invalid_probe_contract", "empty payload")
+		return
+	}
+
+	if !isWASMBytes(probe.Payload) {
+		s.sendProbeAdmissionFailure(challengeID, "probe_payload_invalid", "payload is not wasm bytes")
+		return
+	}
+
+	if s.forensicSandbox == nil {
+		s.sendProbeAdmissionFailure(challengeID, "forensic_sandbox_unavailable", "forensic sandbox is unavailable")
+		return
+	}
+
+	result, err := s.forensicSandbox.HandleServerProbe(ctx, probe.Payload, challengeID)
+	msg := &pool.ProbeResultMessage{
+		Type:        "probe_result",
+		ChallengeID: challengeID,
+		Status:      "FAILED",
+	}
+	if result != nil {
+		if status := strings.TrimSpace(result.Status); status != "" {
+			msg.Status = status
+		}
+		if data := strings.TrimSpace(result.Data); data != "" {
+			msg.Result = data
+		}
+	}
+	if err != nil {
+		msg.ErrorCode = "probe_execution_failed"
+		if result != nil {
+			if code := strings.TrimSpace(result.ErrorCode); code != "" {
+				msg.ErrorCode = code
+			}
+			if detail := strings.TrimSpace(result.ErrorDetail); detail != "" {
+				msg.Result = detail
+			}
+		}
+		if msg.Result == "" {
+			msg.Result = err.Error()
+		}
+	}
+	if sendErr := s.poolClient.SendProbeResult(msg); sendErr != nil {
+		s.logger.Error("failed to send probe_result", "challenge_id", challengeID, "error", sendErr)
+	}
+}
+
+func (s *Scheduler) sendProbeAdmissionFailure(challengeID string, errorCode string, reason string) {
+	msg := &pool.ProbeResultMessage{
+		Type:        "probe_result",
+		ChallengeID: strings.TrimSpace(challengeID),
+		Status:      "REJECTED",
+		Result:      reason,
+		ErrorCode:   errorCode,
+	}
+	if sendErr := s.poolClient.SendProbeResult(msg); sendErr != nil {
+		s.logger.Error("failed to send rejected probe_result", "challenge_id", challengeID, "error_code", errorCode, "error", sendErr)
+	}
+}
+
+func isWASMBytes(payload []byte) bool {
+	if len(payload) < 4 {
+		return false
+	}
+	return payload[0] == 0x00 && payload[1] == 0x61 && payload[2] == 0x73 && payload[3] == 0x6d
 }
 
 func (s *Scheduler) handleLoginAck(ack *pool.LoginAckMessage) {

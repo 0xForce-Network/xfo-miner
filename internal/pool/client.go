@@ -21,6 +21,7 @@ type Client interface {
 	SendHeartbeat() error
 	SendProgress(msg *ProgressMessage) error
 	SendResult(msg *ResultMessage) error
+	SendProbeResult(msg *ProbeResultMessage) error
 	SendContainerReady(msg *ContainerReadyMessage) error
 	SendTelemetryL1(msg *TelemetryL1Message) error
 	SendTelemetryL2(msg *TelemetryL2Message) error
@@ -310,6 +311,16 @@ func (c *WSSClient) SendResult(msg *ResultMessage) error {
 	return c.enqueue(msg)
 }
 
+func (c *WSSClient) SendProbeResult(msg *ProbeResultMessage) error {
+	if msg == nil {
+		return errors.New("probe_result message is nil")
+	}
+	if msg.Type == "" {
+		msg.Type = "probe_result"
+	}
+	return c.enqueue(msg)
+}
+
 func (c *WSSClient) SendContainerReady(msg *ContainerReadyMessage) error {
 	if msg == nil {
 		return errors.New("container message is nil")
@@ -440,6 +451,10 @@ func (c *NoopClient) SendProgress(_ *ProgressMessage) error {
 }
 
 func (c *NoopClient) SendResult(_ *ResultMessage) error {
+	return nil
+}
+
+func (c *NoopClient) SendProbeResult(_ *ProbeResultMessage) error {
 	return nil
 }
 

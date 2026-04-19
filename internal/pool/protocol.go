@@ -79,6 +79,14 @@ type ResultMessage struct {
 	Data        string `json:"data"`
 }
 
+type ProbeResultMessage struct {
+	Type        string `json:"type"`
+	ChallengeID string `json:"challenge_id"`
+	Status      string `json:"status"`
+	Result      string `json:"result,omitempty"`
+	ErrorCode   string `json:"error_code,omitempty"`
+}
+
 type ContainerReadyMessage struct {
 	Type  string `json:"type"`
 	JobID string `json:"job_id"`
@@ -178,4 +186,10 @@ type OTAUpdateMessage struct {
 	LatestVersion string   `json:"latest_version"`
 	DownloadURLs  []string `json:"download_urls"`
 	Checksum      string   `json:"checksum"`
+}
+
+type SendProbeMessage struct {
+	Type        string `json:"type"`
+	ChallengeID string `json:"challenge_id"`
+	Payload     []byte `json:"payload"`
 }
