@@ -1,5 +1,8 @@
 name: miner-release
 
+permissions:
+  contents: write
+
 on:
   push:
     tags:
@@ -196,5 +199,21 @@ jobs:
         with:
           name: xfo-miner-release-${{ steps.meta.outputs.release_tag }}
           path: |
+            dist/packages/*
+            dist/latest.json
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          name: xfo-miner ${{ steps.meta.outputs.release_tag }}
+          body: ${{ github.event.inputs.release_notes || 'Automated miner release' }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          append_body: false
+          make_latest: true
+          generate_release_notes: false
+          files: |
             dist/packages/*
             dist/latest.json
