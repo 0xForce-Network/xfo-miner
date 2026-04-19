@@ -250,81 +250,81 @@ jobs:
             "${manifest_url}" -o "${tmpdir}/latest.json"
 
           python3 - <<'PY' "${tmpdir}/latest.json" "${expected_version}" "${prefix}"
-import json
-import hashlib
-import sys
-from pathlib import Path
-from urllib.request import Request, urlopen
+          import json
+          import hashlib
+          import sys
+          from pathlib import Path
+          from urllib.request import Request, urlopen
 
-manifest_path = Path(sys.argv[1])
-expected_version = sys.argv[2]
-expected_prefix = sys.argv[3]
+          manifest_path = Path(sys.argv[1])
+          expected_version = sys.argv[2]
+          expected_prefix = sys.argv[3]
 
-with manifest_path.open('r', encoding='utf-8') as f:
-    manifest = json.load(f)
+          with manifest_path.open('r', encoding='utf-8') as f:
+              manifest = json.load(f)
 
-if manifest.get('latest_version') != expected_version:
-    raise SystemExit(f"latest_version mismatch: got {manifest.get('latest_version')!r}, want {expected_version!r}")
+          if manifest.get('latest_version') != expected_version:
+              raise SystemExit(f"latest_version mismatch: got {manifest.get('latest_version')!r}, want {expected_version!r}")
 
-assets = manifest.get('assets')
-if not isinstance(assets, dict):
-    raise SystemExit('assets missing or not an object')
+          assets = manifest.get('assets')
+          if not isinstance(assets, dict):
+              raise SystemExit('assets missing or not an object')
 
-expected = {
-    'linux-amd64': 'xfo-miner-linux-amd64.tar.gz',
-    'linux-arm64': 'xfo-miner-linux-arm64.tar.gz',
-    'windows-amd64': 'xfo-miner-windows-amd64.zip',
-    'darwin-amd64': 'xfo-miner-darwin-amd64.tar.gz',
-    'darwin-arm64': 'xfo-miner-darwin-arm64.tar.gz',
-}
+          expected = {
+              'linux-amd64': 'xfo-miner-linux-amd64.tar.gz',
+              'linux-arm64': 'xfo-miner-linux-arm64.tar.gz',
+              'windows-amd64': 'xfo-miner-windows-amd64.zip',
+              'darwin-amd64': 'xfo-miner-darwin-amd64.tar.gz',
+              'darwin-arm64': 'xfo-miner-darwin-arm64.tar.gz',
+          }
 
-rows = []
-failed = False
-for platform, filename in expected.items():
-    asset = assets.get(platform)
-    if not isinstance(asset, dict):
-        rows.append((platform, filename, 'FAIL', 'FAIL', 'missing asset'))
-        failed = True
-        continue
+          rows = []
+          failed = False
+          for platform, filename in expected.items():
+              asset = assets.get(platform)
+              if not isinstance(asset, dict):
+                  rows.append((platform, filename, 'FAIL', 'FAIL', 'missing asset'))
+                  failed = True
+                  continue
 
-    url = asset.get('download_url', '')
-    checksum = asset.get('checksum', '')
-    got_filename = asset.get('filename', '')
-    notes = []
+              url = asset.get('download_url', '')
+              checksum = asset.get('checksum', '')
+              got_filename = asset.get('filename', '')
+              notes = []
 
-    if got_filename != filename:
-        notes.append(f'filename mismatch (got {got_filename!r}, want {filename!r})')
+              if got_filename != filename:
+                  notes.append(f'filename mismatch (got {got_filename!r}, want {filename!r})')
 
-    if not url.startswith(expected_prefix):
-        notes.append(f'url prefix mismatch (got {url!r})')
+              if not url.startswith(expected_prefix):
+                  notes.append(f'url prefix mismatch (got {url!r})')
 
-    if not checksum:
-        notes.append('checksum empty')
+              if not checksum:
+                  notes.append('checksum empty')
 
-    if notes:
-        rows.append((platform, got_filename or filename, 'FAIL', 'FAIL', '; '.join(notes)))
-        failed = True
-        continue
+              if notes:
+                  rows.append((platform, got_filename or filename, 'FAIL', 'FAIL', '; '.join(notes)))
+                  failed = True
+                  continue
 
-    req = Request(url, headers={'User-Agent': 'xfo-miner-release-validator/1.0'})
-    with urlopen(req, timeout=60) as resp:
-        body = resp.read()
-    got = hashlib.sha256(body).hexdigest()
-    if got != checksum:
-        rows.append((platform, filename, 'PASS', 'FAIL', f'checksum mismatch (got {got}, want {checksum})'))
-        failed = True
-        continue
+              req = Request(url, headers={'User-Agent': 'xfo-miner-release-validator/1.0'})
+              with urlopen(req, timeout=60) as resp:
+                  body = resp.read()
+              got = hashlib.sha256(body).hexdigest()
+              if got != checksum:
+                  rows.append((platform, filename, 'PASS', 'FAIL', f'checksum mismatch (got {got}, want {checksum})'))
+                  failed = True
+                  continue
 
-    rows.append((platform, filename, 'PASS', 'PASS', ''))
+              rows.append((platform, filename, 'PASS', 'PASS', ''))
 
-print('PUBLIC RELEASE VALIDATION')
-print('platform         filename                      url   sha256  notes')
-for platform, filename, url_ok, sum_ok, notes in rows:
-    print(f'{platform:<15} {filename:<28} {url_ok:<5} {sum_ok:<6} {notes}')
+          print('PUBLIC RELEASE VALIDATION')
+          print('platform         filename                      url   sha256  notes')
+          for platform, filename, url_ok, sum_ok, notes in rows:
+              print(f'{platform:<15} {filename:<28} {url_ok:<5} {sum_ok:<6} {notes}')
 
-if failed:
-    raise SystemExit(1)
-PY
+          if failed:
+              raise SystemExit(1)
+          PY
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
