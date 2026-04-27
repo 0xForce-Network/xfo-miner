@@ -54,9 +54,17 @@ Field descriptions:
 - `node_id`: Node identifier (required)
 - `worker_name`: Worker node name (required)
 - `pool_url`: Pool address (required, must be `wss://`)
-- `max_cpu_threads`: CPU thread limit (optional, defaults to `runtime.NumCPU()/2`, minimum 1)
+- `max_cpu_threads`: CPU thread limit for `xfo-miner` task execution, and also the default full-mode cap for xmrig when `cpu_mining.max_threads` is omitted (optional, defaults to `runtime.NumCPU()/2`, minimum 1)
+- `cpu_mining`: XMRig CPU mining configuration
+  - `enabled`: Whether to enable XMRig background mining
+  - `xmrig_path`: Path to the xmrig binary
+  - `stratum_url`: Stratum pool URL for xmrig
+  - `max_threads`: XMRig threads in full mining mode
+  - `background_threads`: XMRig threads in heartbeat/standby mode
+  - `extra_args`: Optional JSON string array of additional xmrig arguments, for example `["--proxy=127.0.0.1:1080"]` for SOCKS5
+    - Reserved flags managed by `xfo-miner` are rejected, including pool/auth/algo/thread/HTTP API flags such as `-o/-u/-p/-a/--threads/--http-port`
 - `idle_behavior`: Idle state subprocess configuration
-  - `enabled`: Whether to enable idle miner
+  - `enabled`: Whether to enable idle miner; keep this `false` unless you intentionally want a standby subprocess
   - `grace_period_sec`: Grace period in seconds before stopping idle miner
   - `command`: Idle miner executable command
   - `args`: Idle miner argument string

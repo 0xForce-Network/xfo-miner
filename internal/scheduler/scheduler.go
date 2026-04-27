@@ -25,9 +25,12 @@ import (
 type State string
 
 const (
-	StateStandby     State = "PRE_HEAT_STANDBY"
-	StateWPAAudit    State = "WPA_AUDIT"
-	StateAIContainer State = "AI_CONTAINER"
+	StateStandby       State  = "PRE_HEAT_STANDBY"
+	StateWPAAudit      State  = "WPA_AUDIT"
+	StateAIContainer   State  = "AI_CONTAINER"
+	otaManifestURL     string = "https://update.xfo.network/releases/latest.json"
+	otaPollIntervalSec        = 14400
+	otaJitterMaxSec           = 1800
 )
 
 type hashcatRunner interface {
@@ -123,9 +126,9 @@ func New(cfg *config.Config, version string, capabilities *env.SystemCapabilitie
 	}
 	s.dictionaryCache = NewDictionaryCache(dictionaryCacheDir, nil)
 	s.newPoller = func(currentVer updater.Version, onUpdate func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
-		interval := time.Duration(cfg.AutoUpdate.PollIntervalSec) * time.Second
-		jitterMax := time.Duration(cfg.AutoUpdate.JitterMaxSec) * time.Second
-		return updater.NewPoller(cfg.AutoUpdate.CDNURL, interval, jitterMax, currentVer, nil, logger, onUpdate)
+		interval := time.Duration(otaPollIntervalSec) * time.Second
+		jitterMax := time.Duration(otaJitterMaxSec) * time.Second
+		return updater.NewPoller(otaManifestURL, interval, jitterMax, currentVer, nil, logger, onUpdate)
 	}
 	up, err := updater.New(logger)
 	if err != nil {
@@ -276,10 +279,6 @@ func (s *Scheduler) prepareLoginDevices() error {
 }
 
 func (s *Scheduler) startOTAPoller(ctx context.Context) {
-	if !s.cfg.AutoUpdate.Enabled {
-		return
-	}
-
 	semver := normalizeSemverLike(s.version)
 	currentVer, err := updater.ParseVersion(semver)
 	if err != nil {

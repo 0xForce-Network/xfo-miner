@@ -487,3 +487,56 @@ func TestXMRigManagerInjectsPoolAndWorkerArgs(t *testing.T) {
 	requirePair("-o", "stratum+tcp://pool.example.com:3333")
 	requirePair("-u", testWalletAddress+".Rig-4090-Alpha")
 }
+
+func TestXMRigManagerAppendsExtraArgs(t *testing.T) {
+	t.Parallel()
+
+	pm := &captureProcessManager{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewXMRigManager(pm, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+		ExtraArgs:         []string{"--proxy=127.0.0.1:1080", "--keepalive"},
+	}, "stratum+tcp://pool.example.com:3333", testWalletAddress, "XFo2A88ABC", "Rig-4090-Alpha", logger)
+
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	pm.mu.Lock()
+	args := append([]string(nil), pm.lastArgs...)
+	pm.mu.Unlock()
+
+	requireToken := func(want string) {
+		t.Helper()
+		for _, arg := range args {
+			if arg == want {
+				return
+			}
+		}
+		t.Fatalf("missing arg token %s in args=%v", want, args)
+	}
+
+	requireToken("--proxy=127.0.0.1:1080")
+	requireToken("--keepalive")
+}
+
+func TestXMRigManagerRejectsReservedExtraArgs(t *testing.T) {
+	t.Parallel()
+
+	pm := &captureProcessManager{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewXMRigManager(pm, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+		ExtraArgs:         []string{"--http-port=17777"},
+	}, "stratum+tcp://pool.example.com:3333", testWalletAddress, "XFo2A88ABC", "Rig-4090-Alpha", logger)
+
+	if err := mgr.Start(context.Background()); err == nil {
+		t.Fatalf("expected Start() to reject reserved extra args")
+	}
+}

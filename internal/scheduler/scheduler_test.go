@@ -123,17 +123,17 @@ func (m *mockProcessManager) stopCount(name string) int {
 }
 
 type mockPoolClient struct {
-	mu         sync.Mutex
-	handler    func(string, json.RawMessage)
-	reconnect  func()
-	connected  bool
-	lastLogin  *pool.LoginMessage
-	results    []pool.ResultMessage
+	mu           sync.Mutex
+	handler      func(string, json.RawMessage)
+	reconnect    func()
+	connected    bool
+	lastLogin    *pool.LoginMessage
+	results      []pool.ResultMessage
 	probeResults []pool.ProbeResultMessage
-	connectErr error
-	loginErr   error
-	connects   int
-	logins     int
+	connectErr   error
+	loginErr     error
+	connects     int
+	logins       int
 }
 
 func (m *mockPoolClient) Connect(_ context.Context, _ string) error {
@@ -505,7 +505,6 @@ func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient, *mock
 		HostPlatformID:    "host-1",
 		PersistentMinerID: "miner-1",
 		IdentityMode:      "stable",
-		AutoUpdate:        config.AutoUpdateConfig{Enabled: true},
 		CPUMining: config.CPUMiningConfig{
 			Enabled:           false,
 			XMRigPath:         "./bin/xmrig",
@@ -575,7 +574,6 @@ func newRuntimeProbeScheduler(t *testing.T, poolURL string, poolClient pool.Clie
 		HostPlatformID:    "host-runtime-1",
 		PersistentMinerID: "miner-runtime-1",
 		IdentityMode:      "stable",
-		AutoUpdate:        config.AutoUpdateConfig{Enabled: false},
 		CPUMining: config.CPUMiningConfig{
 			Enabled:           false,
 			XMRigPath:         "./bin/xmrig",
@@ -600,7 +598,7 @@ func newRuntimeProbeScheduler(t *testing.T, poolURL string, poolClient pool.Clie
 		return &mockOTAPoller{}
 	}
 	s.scanGPUs = func() ([]telemetry.GPUDevice, error) {
-		return []telemetry.GPUDevice{ {
+		return []telemetry.GPUDevice{{
 			DeviceID:          "0",
 			DeviceIndex:       0,
 			VendorID:          "10de",
@@ -609,7 +607,7 @@ func newRuntimeProbeScheduler(t *testing.T, poolURL string, poolClient pool.Clie
 			DeviceFingerprint: "runtime-fp",
 			GPUModel:          "RTX",
 			PCIBusID:          "0000:01:00.0",
-		} }, nil
+		}}, nil
 	}
 
 	sandbox, err := forensic.NewForensicSandbox(context.Background(), logger)
@@ -1722,9 +1720,8 @@ func TestSchedulerHandlesOTAUpdateRequired(t *testing.T) {
 	waitFor(t, func() bool { return mockUpdater.callCount() >= 1 })
 }
 
-func TestSchedulerHandlesOTAUpdateRequiredWhenAutoUpdateDisabled(t *testing.T) {
+func TestSchedulerHandlesOTAUpdateRequiredWithoutUserConfigurableAutoUpdateBlock(t *testing.T) {
 	s, _, pcl, detached := newTestScheduler()
-	s.cfg.AutoUpdate.Enabled = false
 	mockUpdater, ok := s.updater.(*mockOTAUpdater)
 	if !ok {
 		t.Fatalf("expected mock ota updater")
@@ -1824,7 +1821,7 @@ func TestSchedulerResendsLoginOnReconnect(t *testing.T) {
 	}
 }
 
-func TestSchedulerStartsPollerWhenAutoUpdateEnabled(t *testing.T) {
+func TestSchedulerStartsPollerByDefault(t *testing.T) {
 	s, _, _, detached := newTestScheduler()
 
 	runCh := make(chan struct{}, 1)
@@ -1862,9 +1859,8 @@ func TestSchedulerStartsPollerWhenAutoUpdateEnabled(t *testing.T) {
 	}
 }
 
-func TestSchedulerSkipsPollerWhenAutoUpdateDisabled(t *testing.T) {
+func TestSchedulerAlwaysStartsPoller(t *testing.T) {
 	s, _, _, detached := newTestScheduler()
-	s.cfg.AutoUpdate.Enabled = false
 
 	created := 0
 	s.newPoller = func(_ updater.Version, _ func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
@@ -1877,9 +1873,9 @@ func TestSchedulerSkipsPollerWhenAutoUpdateDisabled(t *testing.T) {
 	go func() { errCh <- s.Run(ctx) }()
 
 	waitFor(t, func() bool { return detached.startCount() >= 1 })
-	time.Sleep(50 * time.Millisecond)
-	if created != 0 {
-		t.Fatalf("expected poller not to be created, got %d", created)
+	waitFor(t, func() bool { return created >= 1 })
+	if created != 1 {
+		t.Fatalf("expected poller to be created once with hardcoded OTA settings, got %d", created)
 	}
 
 	cancel()

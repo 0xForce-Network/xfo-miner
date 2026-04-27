@@ -54,9 +54,17 @@ Descripción de campos:
 - `node_id`: Identificador del nodo (obligatorio)
 - `worker_name`: Nombre del nodo trabajador (obligatorio)
 - `pool_url`: Dirección del pool (obligatorio, debe ser `wss://`)
-- `max_cpu_threads`: Límite de hilos CPU (opcional, por defecto `runtime.NumCPU()/2`, mínimo 1)
+- `max_cpu_threads`: Límite de hilos CPU para la ejecución de tareas de `xfo-miner`, y también el límite por defecto del modo completo de xmrig cuando `cpu_mining.max_threads` no se especifica (opcional, por defecto `runtime.NumCPU()/2`, mínimo 1)
+- `cpu_mining`: Configuración de minería CPU con XMRig
+  - `enabled`: Activa la minería de fondo con XMRig
+  - `xmrig_path`: Ruta al binario de xmrig
+  - `stratum_url`: URL stratum usada por xmrig
+  - `max_threads`: Hilos de XMRig en modo de minería completa
+  - `background_threads`: Hilos de XMRig en modo heartbeat/standby
+  - `extra_args`: Arreglo JSON opcional de argumentos extra para xmrig, por ejemplo `["--proxy=127.0.0.1:1080"]` para SOCKS5
+    - Las flags reservadas gestionadas por `xfo-miner` se rechazan, incluyendo flags de pool/auth/algo/hilos/API HTTP como `-o/-u/-p/-a/--threads/--http-port`
 - `idle_behavior`: Configuración del subproceso en estado inactivo
-  - `enabled`: Habilitar minero inactivo
+  - `enabled`: Habilitar minero inactivo; conviene dejarlo en `false` salvo que realmente quieras un subproceso de standby explícito
   - `grace_period_sec`: Segundos de gracia antes de detener el minero inactivo
   - `command`: Comando ejecutable del minero inactivo
   - `args`: Cadena de argumentos del minero inactivo

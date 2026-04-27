@@ -30,13 +30,13 @@ type xmrigController interface {
 }
 
 type XMRigManager struct {
-	procManager process.Manager
-	cfg         *config.CPUMiningConfig
-	logger      *slog.Logger
-	stratumURL  string
+	procManager   process.Manager
+	cfg           *config.CPUMiningConfig
+	logger        *slog.Logger
+	stratumURL    string
 	walletAddress string
-	nodeID      string
-	workerName  string
+	nodeID        string
+	workerName    string
 
 	httpPort               int
 	httpClient             *http.Client
@@ -172,6 +172,10 @@ func (m *XMRigManager) restartWithModeLocked(ctx context.Context, mode string, t
 		}
 	}
 
+	if err := m.cfg.ValidateExtraArgs(); err != nil {
+		return fmt.Errorf("validate xmrig extra args: %w", err)
+	}
+
 	args := []string{
 		"--http-port", strconv.Itoa(m.httpPort),
 		"--threads", strconv.Itoa(threads),
@@ -182,6 +186,7 @@ func (m *XMRigManager) restartWithModeLocked(ctx context.Context, mode string, t
 		"--no-color",
 		"--user-agent", fmt.Sprintf("XMRig/6.19.3 (xfo-miner) threads:%d", threads),
 	}
+	args = append(args, m.cfg.ExtraArgs...)
 	m.logger.Info("xmrig starting", "path", m.cfg.XMRigPath, "args", args)
 
 	proc, err := m.procManager.Start(ctx, xmrigProcessName, m.cfg.XMRigPath, args)

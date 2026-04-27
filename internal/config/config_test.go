@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -22,9 +23,6 @@ func TestLoadConfigAppliesDefaultCPUThreads(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 0,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "idle_behavior": {
 	    "enabled": false,
 	    "grace_period_sec": 0,
@@ -62,9 +60,6 @@ func TestLoadConfigValidationErrors(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "http://pool.example.com/ws",
 	  "max_cpu_threads": 1,
-	  "auto_update": {
-	    "enabled": false
-	  },
 	  "idle_behavior": {
 	    "enabled": false,
 	    "grace_period_sec": 0,
@@ -98,9 +93,6 @@ func TestLoadConfigCPUMiningDefaults(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": %d,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": true,
 	    "xmrig_path": "./bin/xmrig",
@@ -144,9 +136,6 @@ func TestLoadConfigCPUMiningValidationBackgroundMinimum(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 4,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": true,
 	    "xmrig_path": "./bin/xmrig",
@@ -182,9 +171,6 @@ func TestLoadConfigCPUMiningValidationMaxGTEBackground(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 4,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": true,
 	    "xmrig_path": "./bin/xmrig",
@@ -209,6 +195,93 @@ func TestLoadConfigCPUMiningValidationMaxGTEBackground(t *testing.T) {
 	}
 }
 
+func TestLoadConfigCPUMiningExtraArgsTrimmed(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "cpu-mining-extra-args.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
+	  "worker_name": "worker-1",
+	  "pool_url": "wss://pool.example.com/ws",
+	  "max_cpu_threads": 4,
+	  "cpu_mining": {
+	    "enabled": true,
+	    "xmrig_path": "./bin/xmrig",
+	    "stratum_url": "stratum+tcp://pool.example.com:3333",
+	    "max_threads": 4,
+	    "background_threads": 1,
+	    "extra_args": ["  --proxy=127.0.0.1:1080  ", " --keepalive "]
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if len(cfg.CPUMining.ExtraArgs) != 2 {
+		t.Fatalf("unexpected extra args length: got %d want 2", len(cfg.CPUMining.ExtraArgs))
+	}
+	if cfg.CPUMining.ExtraArgs[0] != "--proxy=127.0.0.1:1080" {
+		t.Fatalf("unexpected first extra arg: got %q", cfg.CPUMining.ExtraArgs[0])
+	}
+	if cfg.CPUMining.ExtraArgs[1] != "--keepalive" {
+		t.Fatalf("unexpected second extra arg: got %q", cfg.CPUMining.ExtraArgs[1])
+	}
+}
+
+func TestLoadConfigCPUMiningValidationRejectsReservedExtraArgs(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "cpu-mining-invalid-extra-args.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
+	  "worker_name": "worker-1",
+	  "pool_url": "wss://pool.example.com/ws",
+	  "max_cpu_threads": 4,
+	  "cpu_mining": {
+	    "enabled": true,
+	    "xmrig_path": "./bin/xmrig",
+	    "stratum_url": "stratum+tcp://pool.example.com:3333",
+	    "max_threads": 4,
+	    "background_threads": 1,
+	    "extra_args": ["--http-port=17777"]
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatalf("expected validation error for reserved cpu_mining.extra_args")
+	}
+	if !strings.Contains(err.Error(), "reserved xmrig flag") {
+		t.Fatalf("expected reserved flag validation error, got: %v", err)
+	}
+}
+
 func TestLoadConfigWalletAddressValidation(t *testing.T) {
 	t.Parallel()
 
@@ -220,9 +293,6 @@ func TestLoadConfigWalletAddressValidation(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 4,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": true,
 	    "xmrig_path": "./bin/xmrig",
@@ -258,9 +328,6 @@ func TestLoadConfigL2RequiresWalletAddress(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 2,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": false,
 	    "xmrig_path": "",
@@ -296,9 +363,6 @@ func TestLoadConfigL2WalletAddressValidation(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "wss://pool.example.com/ws",
 	  "max_cpu_threads": 2,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": false,
 	    "xmrig_path": "",
@@ -334,9 +398,6 @@ func TestLoadConfigEmptyPoolURLAllowed(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "",
 	  "max_cpu_threads": 1,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": false,
 	    "xmrig_path": "",
@@ -386,9 +447,6 @@ func TestLoadConfigNodeIDAutoGeneratedWhenEmpty(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "",
 	  "max_cpu_threads": 2,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": true,
 	    "xmrig_path": "./bin/xmrig",
@@ -417,11 +475,11 @@ func TestLoadConfigNodeIDAutoGeneratedWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestLoadConfigAutoUpdateDefaults(t *testing.T) {
+func TestLoadConfigRejectsLegacyAutoUpdateBlock(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	path := filepath.Join(tempDir, "auto-update-defaults.json")
+	path := filepath.Join(tempDir, "legacy-auto-update.json")
 	content := `{
 	  "node_id": "node-1",
 	  "wallet_address": "",
@@ -430,58 +488,6 @@ func TestLoadConfigAutoUpdateDefaults(t *testing.T) {
 	  "max_cpu_threads": 2,
 	  "auto_update": {
 	    "enabled": true
-	  },
-	  "cpu_mining": {
-	    "enabled": false,
-	    "xmrig_path": "",
-	    "stratum_url": "",
-	    "max_threads": 0,
-	    "background_threads": 0
-	  },
-	  "idle_behavior": {
-	    "enabled": false,
-	    "grace_period_sec": 0,
-	    "command": "",
-	    "args": ""
-	  }
-	}`
-
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("write config file: %v", err)
-	}
-
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig() error = %v", err)
-	}
-
-	if cfg.AutoUpdate.CDNURL != "https://update.xfo.network/releases/latest.json" {
-		t.Fatalf("unexpected auto_update.cdn_url default: %q", cfg.AutoUpdate.CDNURL)
-	}
-	if cfg.AutoUpdate.PollIntervalSec != 14400 {
-		t.Fatalf("unexpected auto_update.poll_interval_sec default: %d", cfg.AutoUpdate.PollIntervalSec)
-	}
-	if cfg.AutoUpdate.JitterMaxSec != 1800 {
-		t.Fatalf("unexpected auto_update.jitter_max_sec default: %d", cfg.AutoUpdate.JitterMaxSec)
-	}
-}
-
-func TestLoadConfigAutoUpdateInvalidCDNURL(t *testing.T) {
-	t.Parallel()
-
-	tempDir := t.TempDir()
-	path := filepath.Join(tempDir, "auto-update-invalid-cdn.json")
-	content := `{
-	  "node_id": "node-1",
-	  "wallet_address": "",
-	  "worker_name": "worker-1",
-	  "pool_url": "",
-	  "max_cpu_threads": 2,
-	  "auto_update": {
-	    "enabled": true,
-	    "cdn_url": "not-a-url",
-	    "poll_interval_sec": 10,
-	    "jitter_max_sec": 0
 	  },
 	  "cpu_mining": {
 	    "enabled": false,
@@ -503,7 +509,48 @@ func TestLoadConfigAutoUpdateInvalidCDNURL(t *testing.T) {
 	}
 
 	if _, err := LoadConfig(path); err == nil {
-		t.Fatalf("expected validation error for invalid auto_update.cdn_url")
+		t.Fatalf("expected decode error for legacy auto_update block")
+	} else if !strings.Contains(err.Error(), "unknown field \"auto_update\"") {
+		t.Fatalf("expected unknown auto_update field error, got %v", err)
+	}
+}
+
+func TestLoadConfigRejectsRuntimeOwnedIdentityFields(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "runtime-owned-identity.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "",
+	  "worker_name": "worker-1",
+	  "host_platform_id": "forged-host",
+	  "persistent_miner_id": "forged-miner",
+	  "pool_url": "",
+	  "max_cpu_threads": 2,
+	  "cpu_mining": {
+	    "enabled": false,
+	    "xmrig_path": "",
+	    "stratum_url": "",
+	    "max_threads": 0,
+	    "background_threads": 0
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatalf("expected decode error for runtime-owned identity fields")
+	} else if !strings.Contains(err.Error(), "unknown field \"host_platform_id\"") {
+		t.Fatalf("expected unknown host_platform_id field error, got %v", err)
 	}
 }
 
@@ -518,9 +565,6 @@ func TestLoadConfigHashcatPathDefault(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "",
 	  "max_cpu_threads": 2,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": false,
 	    "xmrig_path": "",
@@ -562,9 +606,6 @@ func TestLoadConfigHashcatPathCustom(t *testing.T) {
 	  "pool_url": "",
 	  "hashcat_path": "/opt/hashcat/hashcat",
 	  "max_cpu_threads": 2,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": false,
 	    "xmrig_path": "",
@@ -605,9 +646,6 @@ func TestLoadConfigStableIdentityGeneratedAndPersisted(t *testing.T) {
 	  "worker_name": "worker-1",
 	  "pool_url": "",
 	  "max_cpu_threads": 2,
-	  "auto_update": {
-	    "enabled": true
-	  },
 	  "cpu_mining": {
 	    "enabled": false,
 	    "xmrig_path": "",

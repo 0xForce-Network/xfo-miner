@@ -20,20 +20,19 @@ import (
 
 // Config maps specs §4 config.json.
 type Config struct {
-	NodeID             string           `json:"node_id"`
-	WalletAddress      string           `json:"wallet_address"`
-	WorkerName         string           `json:"worker_name"`
-	HostPlatformID     string           `json:"host_platform_id,omitempty"`
-	HostPlatformSource string           `json:"host_platform_source,omitempty"`
-	PersistentMinerID  string           `json:"persistent_miner_id,omitempty"`
-	PoolURL            string           `json:"pool_url"`
-	HashcatPath        string           `json:"hashcat_path"`
-	MaxCPUThreads      int              `json:"max_cpu_threads"`
-	AutoUpdate         AutoUpdateConfig `json:"auto_update"`
-	IdleBehavior       IdleBehavior     `json:"idle_behavior"`
-	CPUMining          CPUMiningConfig  `json:"cpu_mining"`
-	IdentityMode       string           `json:"identity_mode,omitempty"`
-	identityStatePath  string           `json:"-"`
+	NodeID             string          `json:"node_id"`
+	WalletAddress      string          `json:"wallet_address"`
+	WorkerName         string          `json:"worker_name"`
+	HostPlatformID     string          `json:"-"`
+	HostPlatformSource string          `json:"-"`
+	PersistentMinerID  string          `json:"-"`
+	PoolURL            string          `json:"pool_url"`
+	HashcatPath        string          `json:"hashcat_path"`
+	MaxCPUThreads      int             `json:"max_cpu_threads"`
+	IdleBehavior       IdleBehavior    `json:"idle_behavior"`
+	CPUMining          CPUMiningConfig `json:"cpu_mining"`
+	IdentityMode       string          `json:"-"`
+	identityStatePath  string          `json:"-"`
 }
 
 type identityState struct {
@@ -47,19 +46,6 @@ type identityState struct {
 var hostPlatformExecCommandContext = exec.CommandContext
 var hostPlatformGOOS = runtime.GOOS
 
-type AutoUpdateConfig struct {
-	Enabled         bool   `json:"enabled"`
-	CDNURL          string `json:"cdn_url"`
-	PollIntervalSec int    `json:"poll_interval_sec"`
-	JitterMaxSec    int    `json:"jitter_max_sec"`
-}
-
-const (
-	defaultAutoUpdateCDNURL          = "https://update.xfo.network/releases/latest.json"
-	defaultAutoUpdatePollIntervalSec = 14400
-	defaultAutoUpdateJitterMaxSec    = 1800
-)
-
 type IdleBehavior struct {
 	Enabled        bool   `json:"enabled"`
 	GracePeriodSec int    `json:"grace_period_sec"`
@@ -68,11 +54,73 @@ type IdleBehavior struct {
 }
 
 type CPUMiningConfig struct {
-	Enabled           bool   `json:"enabled"`
-	XMRigPath         string `json:"xmrig_path"`
-	StratumURL        string `json:"stratum_url"`
-	MaxThreads        int    `json:"max_threads"`
-	BackgroundThreads int    `json:"background_threads"`
+	Enabled           bool     `json:"enabled"`
+	XMRigPath         string   `json:"xmrig_path"`
+	StratumURL        string   `json:"stratum_url"`
+	MaxThreads        int      `json:"max_threads"`
+	BackgroundThreads int      `json:"background_threads"`
+	ExtraArgs         []string `json:"extra_args,omitempty"`
+}
+
+var reservedXMRigFlags = map[string]struct{}{
+	"-a":                     {},
+	"--algo":                 {},
+	"-c":                     {},
+	"--config":               {},
+	"--cpu-max-threads-hint": {},
+	"--http-access-token":    {},
+	"--http-enabled":         {},
+	"--http-host":            {},
+	"--http-no-restricted":   {},
+	"--http-port":            {},
+	"--no-color":             {},
+	"-o":                     {},
+	"--pass":                 {},
+	"-O":                     {},
+	"--threads":              {},
+	"-p":                     {},
+	"--url":                  {},
+	"--user":                 {},
+	"--user-agent":           {},
+	"--userpass":             {},
+	"-t":                     {},
+	"-u":                     {},
+}
+
+func classifyReservedXMRigFlag(token string) (string, bool) {
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		return "", false
+	}
+
+	if idx := strings.Index(trimmed, "="); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+
+	_, ok := reservedXMRigFlags[trimmed]
+	return trimmed, ok
+}
+
+func (c *CPUMiningConfig) ValidateExtraArgs() error {
+	var validationErrs []error
+	for i, raw := range c.ExtraArgs {
+		arg := strings.TrimSpace(raw)
+		if arg == "" {
+			validationErrs = append(validationErrs, fmt.Errorf("cpu_mining.extra_args[%d] cannot be empty", i))
+			continue
+		}
+
+		c.ExtraArgs[i] = arg
+		if reservedFlag, reserved := classifyReservedXMRigFlag(arg); reserved {
+			validationErrs = append(validationErrs, fmt.Errorf("cpu_mining.extra_args[%d] uses reserved xmrig flag %q managed by xfo-miner", i, reservedFlag))
+		}
+	}
+
+	if len(validationErrs) > 0 {
+		return errors.Join(validationErrs...)
+	}
+
+	return nil
 }
 
 func (c *Config) L2Enabled() bool {
@@ -341,16 +389,6 @@ func (c *Config) applyDefaults() error {
 		c.CPUMining.MaxThreads = c.MaxCPUThreads
 	}
 
-	if strings.TrimSpace(c.AutoUpdate.CDNURL) == "" {
-		c.AutoUpdate.CDNURL = defaultAutoUpdateCDNURL
-	}
-	if c.AutoUpdate.PollIntervalSec <= 0 {
-		c.AutoUpdate.PollIntervalSec = defaultAutoUpdatePollIntervalSec
-	}
-	if c.AutoUpdate.JitterMaxSec <= 0 {
-		c.AutoUpdate.JitterMaxSec = defaultAutoUpdateJitterMaxSec
-	}
-
 	return nil
 }
 
@@ -412,17 +450,9 @@ func (c *Config) Validate() error {
 		if c.CPUMining.MaxThreads < c.CPUMining.BackgroundThreads {
 			validationErrs = append(validationErrs, errors.New("cpu_mining.max_threads must be >= cpu_mining.background_threads"))
 		}
-	}
-
-	if c.AutoUpdate.PollIntervalSec < 1 {
-		validationErrs = append(validationErrs, errors.New("auto_update.poll_interval_sec must be >= 1"))
-	}
-	if c.AutoUpdate.JitterMaxSec < 0 {
-		validationErrs = append(validationErrs, errors.New("auto_update.jitter_max_sec must be >= 0"))
-	}
-	cdnURL, err := url.Parse(c.AutoUpdate.CDNURL)
-	if err != nil || cdnURL.Host == "" || (cdnURL.Scheme != "https" && cdnURL.Scheme != "http") {
-		validationErrs = append(validationErrs, errors.New("auto_update.cdn_url must be a valid http(s) URL"))
+		if err := c.CPUMining.ValidateExtraArgs(); err != nil {
+			validationErrs = append(validationErrs, err)
+		}
 	}
 
 	if len(validationErrs) > 0 {

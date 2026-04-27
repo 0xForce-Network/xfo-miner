@@ -54,9 +54,17 @@ make release      # clean + checksums（完整發佈流程）
 - `node_id`：節點識別碼（必填）
 - `worker_name`：工作節點名稱（必填）
 - `pool_url`：礦池位址（必填，必須為 `wss://`）
-- `max_cpu_threads`：CPU 執行緒上限（選填，預設 `runtime.NumCPU()/2`，最小 1）
+- `max_cpu_threads`：`xfo-miner` 任務執行使用的 CPU 執行緒上限；若未設定 `cpu_mining.max_threads`，也會作為 xmrig 完整挖礦模式的預設上限（選填，預設 `runtime.NumCPU()/2`，最小 1）
+- `cpu_mining`：XMRig CPU 挖礦設定
+  - `enabled`：是否啟用 XMRig 背景挖礦
+  - `xmrig_path`：xmrig 執行檔路徑
+  - `stratum_url`：xmrig 使用的 stratum 礦池 URL
+  - `max_threads`：完整挖礦模式下的 XMRig 執行緒數
+  - `background_threads`：heartbeat/standby 模式下的 XMRig 執行緒數
+  - `extra_args`：可選的 xmrig 額外參數 JSON 字串陣列，例如 `["--proxy=127.0.0.1:1080"]` 可啟用 SOCKS5
+    - 由 `xfo-miner` 自行管理的保留旗標會被拒絕，包含 pool/auth/algo/thread/HTTP API 相關旗標，如 `-o/-u/-p/-a/--threads/--http-port`
 - `idle_behavior`：閒置狀態子程序設定
-  - `enabled`：是否啟用閒置礦工
+  - `enabled`：是否啟用閒置礦工；除非你明確要啟動 standby 子程序，否則建議保持 `false`
   - `grace_period_sec`：停止閒置礦工的寬限秒數
   - `command`：閒置礦工可執行命令
   - `args`：閒置礦工參數字串

@@ -144,19 +144,18 @@ CONFIG FILE PARAMETERS (config.json):
     node_id              (string)  Unique miner node identifier (optional; auto-generated if empty)
     worker_name          (string)  Human-readable worker/rig name (required)
     pool_url             (string)  Pool WebSocket endpoint, wss:// or ws:// (optional; leave empty for L1-only mode)
-    max_cpu_threads      (int)     Max CPU threads for task execution (default: half of system CPUs)
-  auto_update:
-    enabled              (bool)    Enable OTA auto-update (default: false)
+    max_cpu_threads      (int)     Max CPU threads for xfo-miner task execution and default xmrig full-mode cap (default: half of system CPUs)
 
   cpu_mining:
     enabled              (bool)    Enable CPU mining via xmrig (default: false)
     xmrig_path           (string)  Path to xmrig binary (required when enabled)
     stratum_url          (string)  Stratum pool URL, e.g. stratum+tcp://host:3333 (required when enabled)
-    max_threads          (int)     Max threads for active mining (default: max_cpu_threads)
-    background_threads   (int)     Threads used during background/idle mining (default: 1)
+    max_threads          (int)     XMRig threads in full mining mode (default: max_cpu_threads)
+    background_threads   (int)     XMRig threads in standby/heartbeat mode (default: 1)
+    extra_args           ([]str)   Extra xmrig CLI args, e.g. ["--proxy=127.0.0.1:1080"] (reserved control flags rejected)
 
   idle_behavior:
-    enabled              (bool)    Enable idle-mode fallback mining (default: false)
+    enabled              (bool)    Enable idle-mode fallback mining (default: false; keep disabled unless you have an explicit idle miner command)
     grace_period_sec     (int)     Seconds to wait before entering idle mode (default: 0)
     command              (string)  Idle miner binary path (required when enabled)
     args                 (string)  Arguments passed to idle miner command

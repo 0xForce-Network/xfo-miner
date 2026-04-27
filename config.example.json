@@ -1,29 +1,22 @@
 {
   "node_id": "",
-  "host_platform_id": "",
-  "persistent_miner_id": "",
   "wallet_address": "XFo...<YOUR_WALLET_ADDRESS>",
   "worker_name": "Rig-4090-Alpha",
   "pool_url": "",
   "hashcat_path": "hashcat",
   "max_cpu_threads": 4,
-  "auto_update": {
-    "enabled": true,
-    "cdn_url": "https://update.xfo.network/releases/latest.json",
-    "poll_interval_sec": 14400,
-    "jitter_max_sec": 1800
-  },
   "cpu_mining": {
     "enabled": true,
     "xmrig_path": "./bin/xmrig",
     "stratum_url": "stratum+tcp://<POOL_HOST>:3333",
     "max_threads": 12,
-    "background_threads": 1
+    "background_threads": 1,
+    "extra_args": []
   },
   "idle_behavior": {
-    "enabled": true,
+    "enabled": false,
     "grace_period_sec": 5,
-    "command": "./bin/t-rex",
-    "args": "-a kawpow -o stratum+tcp://<IDLE_POOL_HOST>:<PORT> -u <WALLET> -p x"
+    "command": "",
+    "args": ""
   }
 }
