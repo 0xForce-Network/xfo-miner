@@ -20,6 +20,10 @@ on:
         description: 'Release notes shown in latest.json'
         required: false
         default: 'Automated miner release'
+      release_notes_path:
+        description: 'Optional markdown file path for richer GitHub release notes (e.g. .github/releases/v1.0.2.md)'
+        required: false
+        default: ''
 
 jobs:
   build-and-publish:
@@ -79,9 +83,26 @@ jobs:
           fi
 
           INPUT_RELEASE_NOTES="${{ github.event.inputs.release_notes }}"
+          INPUT_RELEASE_NOTES_PATH="${{ github.event.inputs.release_notes_path }}"
           RELEASE_BODY="${{ github.event.release.body }}"
+          RELEASE_NOTES_FILE=""
+
+          if [[ -n "${INPUT_RELEASE_NOTES_PATH}" ]]; then
+            if [[ ! -f "${INPUT_RELEASE_NOTES_PATH}" ]]; then
+              echo "release notes file not found: ${INPUT_RELEASE_NOTES_PATH}" >&2
+              exit 1
+            fi
+            RELEASE_NOTES_FILE="${INPUT_RELEASE_NOTES_PATH}"
+          elif [[ -f ".github/releases/${RELEASE_TAG}.md" ]]; then
+            RELEASE_NOTES_FILE=".github/releases/${RELEASE_TAG}.md"
+          elif [[ -f ".github/releases/${VERSION}.md" ]]; then
+            RELEASE_NOTES_FILE=".github/releases/${VERSION}.md"
+          fi
+
           if [[ -n "${INPUT_RELEASE_NOTES}" ]]; then
             RELEASE_NOTES="${INPUT_RELEASE_NOTES}"
+          elif [[ -n "${RELEASE_NOTES_FILE}" ]]; then
+            RELEASE_NOTES="$(cat "${RELEASE_NOTES_FILE}")"
           elif [[ -n "${RELEASE_BODY}" ]]; then
             RELEASE_NOTES="${RELEASE_BODY}"
           else
@@ -93,6 +114,7 @@ jobs:
           echo "prefix=${PREFIX}" >> "$GITHUB_OUTPUT"
           echo "endpoint=${ENDPOINT}" >> "$GITHUB_OUTPUT"
           echo "min_version=${MIN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_notes_file=${RELEASE_NOTES_FILE}" >> "$GITHUB_OUTPUT"
           {
             echo "release_notes<<EOF"
             printf '%s\n' "${RELEASE_NOTES}"
