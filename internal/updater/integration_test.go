@@ -47,7 +47,7 @@ func TestIntegrationPollerToUpdaterTarGzFlow(t *testing.T) {
 	t.Parallel()
 
 	payload := []byte("new-binary-from-cdn")
-	archiveBytes := buildTarGzBinary(t, "release/xfo-miner", payload)
+	archiveBytes := buildTarGzBinary(t, "release/"+packagedBinaryName(runtime.GOOS, runtime.GOARCH), payload)
 	checksum := sha256.Sum256(archiveBytes)
 	platformKey := runtime.GOOS + "-" + runtime.GOARCH
 
@@ -119,7 +119,7 @@ func TestIntegrationPassiveOTAUpdateExecuteFlow(t *testing.T) {
 	t.Parallel()
 
 	payload := []byte("passive-update-binary")
-	archiveBytes := buildTarGzBinary(t, "release/xfo-miner", payload)
+	archiveBytes := buildTarGzBinary(t, "release/"+packagedBinaryName(runtime.GOOS, runtime.GOARCH), payload)
 	checksum := sha256.Sum256(archiveBytes)
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

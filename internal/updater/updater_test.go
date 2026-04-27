@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -19,9 +20,17 @@ import (
 
 func testUpdater(t *testing.T) *Updater {
 	t.Helper()
+	return testUpdaterWithExecutableName(t, "xfo-miner")
+	}
+
+func testUpdaterWithExecutableName(t *testing.T, executableName string) *Updater {
+	t.Helper()
 
 	tmpDir := t.TempDir()
-	execPath := filepath.Join(tmpDir, "xfo-miner")
+	if strings.TrimSpace(executableName) == "" {
+		executableName = "xfo-miner"
+	}
+	execPath := filepath.Join(tmpDir, executableName)
 	if err := os.WriteFile(execPath, []byte("old-binary"), 0o755); err != nil {
 		t.Fatalf("write fake executable: %v", err)
 	}
@@ -39,6 +48,76 @@ func testUpdater(t *testing.T) *Updater {
 	}
 
 	return u
+}
+
+func TestExecuteArchiveUpdatePreservesCustomExecutablePath(t *testing.T) {
+	t.Parallel()
+
+	customExecName := "rig-alpha"
+	archiveBinaryName := "xfo-miner"
+	if runtime.GOOS == "windows" {
+		customExecName += ".exe"
+		archiveBinaryName += ".exe"
+	}
+
+	payload := []byte("custom-name-updated-binary")
+	archiveBytes := buildTarGzBinary(t, "release/"+archiveBinaryName, payload)
+	checksum := sha256.Sum256(archiveBytes)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archiveBytes)
+	}))
+	defer server.Close()
+
+	u := testUpdaterWithExecutableName(t, customExecName)
+	u.client = server.Client()
+
+	swapCalled := 0
+	u.swapFn = func(_ context.Context, downloadedFile string) error {
+		swapCalled++
+		if filepath.Base(u.executablePath) != customExecName {
+			t.Fatalf("expected custom executable basename %q, got %q", customExecName, filepath.Base(u.executablePath))
+		}
+		if len(u.args) == 0 || u.args[0] != u.executablePath {
+			t.Fatalf("expected args[0] to preserve executable path %q, got %v", u.executablePath, u.args)
+		}
+
+		got, err := os.ReadFile(downloadedFile)
+		if err != nil {
+			return err
+		}
+		if string(got) != string(payload) {
+			t.Fatalf("unexpected extracted payload: got %q want %q", string(got), string(payload))
+		}
+
+		if err := os.Remove(u.executablePath); err != nil {
+			return err
+		}
+		if err := os.Rename(downloadedFile, u.executablePath); err != nil {
+			return err
+		}
+
+		replaced, err := os.ReadFile(u.executablePath)
+		if err != nil {
+			return err
+		}
+		if string(replaced) != string(payload) {
+			t.Fatalf("unexpected replaced executable payload: got %q want %q", string(replaced), string(payload))
+		}
+		return nil
+	}
+
+	err := u.Execute(context.Background(), &pool.OTAUpdateMessage{
+		LatestVersion: "0.2.0",
+		DownloadURLs:  []string{server.URL + "/pkg.tar.gz"},
+		Checksum:      hex.EncodeToString(checksum[:]),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if swapCalled != 1 {
+		t.Fatalf("expected swap called once, got %d", swapCalled)
+	}
 }
 
 func TestExecuteFallbackAndChecksumSuccess(t *testing.T) {

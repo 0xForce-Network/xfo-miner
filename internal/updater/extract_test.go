@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -102,5 +103,29 @@ func TestExtractArchiveInvalid(t *testing.T) {
 
 	if err := ExtractArchive(archivePath, destDir); err == nil {
 		t.Fatalf("expected ExtractArchive() to fail for invalid archive")
+	}
+}
+
+func TestLocateExtractedBinaryFindsPlatformPackagedName(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	releaseDir := filepath.Join(tmpDir, "release")
+	if err := os.MkdirAll(releaseDir, 0o755); err != nil {
+		t.Fatalf("mkdir release dir: %v", err)
+	}
+
+	binaryName := packagedBinaryName(runtime.GOOS, runtime.GOARCH)
+	binaryPath := filepath.Join(releaseDir, binaryName)
+	if err := os.WriteFile(binaryPath, []byte("binary-data"), 0o755); err != nil {
+		t.Fatalf("write packaged binary: %v", err)
+	}
+
+	found, err := locateExtractedBinary(tmpDir, "xfo-miner")
+	if err != nil {
+		t.Fatalf("locateExtractedBinary() error = %v", err)
+	}
+	if found != binaryPath {
+		t.Fatalf("unexpected located binary: got %q want %q", found, binaryPath)
 	}
 }

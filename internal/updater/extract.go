@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -80,11 +81,7 @@ func detectArchiveFormat(sourceHint, filePath string) (string, error) {
 }
 
 func locateExtractedBinary(destDir, preferredName string) (string, error) {
-	candidates := []string{}
-	if strings.TrimSpace(preferredName) != "" {
-		candidates = append(candidates, preferredName)
-	}
-	candidates = append(candidates, "xfo-miner", "xfo-miner.exe")
+	candidates := extractedBinaryCandidates(preferredName)
 
 	seen := map[string]struct{}{}
 	for _, c := range candidates {
@@ -123,6 +120,27 @@ func locateExtractedBinary(destDir, preferredName string) (string, error) {
 	}
 
 	return "", errors.New("main binary not found in extracted archive")
+}
+
+func extractedBinaryCandidates(preferredName string) []string {
+	candidates := []string{}
+	if strings.TrimSpace(preferredName) != "" {
+		candidates = append(candidates, preferredName)
+	}
+	candidates = append(candidates,
+		packagedBinaryName(runtime.GOOS, runtime.GOARCH),
+		"xfo-miner",
+		"xfo-miner.exe",
+	)
+	return candidates
+}
+
+func packagedBinaryName(goos, goarch string) string {
+	name := fmt.Sprintf("xfo-miner-%s-%s", goos, goarch)
+	if goos == "windows" {
+		return name + ".exe"
+	}
+	return name
 }
 
 func extractTarGz(archivePath, destDir string) error {

@@ -136,10 +136,13 @@ jobs:
             local PLATFORM_KEY="${GOOS}-${GOARCH}"
             local BIN_NAME="xfo-miner"
             local RAW_BIN="dist/${BIN_NAME}-${PLATFORM_KEY}"
+            local PACKAGE_DIR="dist/package-${PLATFORM_KEY}"
+            local PACKAGE_BIN="${BIN_NAME}"
             local ARCHIVE_EPOCH="1970-01-01 00:00:00Z"
 
             if [[ "${GOOS}" == "windows" ]]; then
               RAW_BIN+=".exe"
+              PACKAGE_BIN+=".exe"
             fi
 
             CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" \
@@ -149,19 +152,25 @@ jobs:
               ./cmd/xfo-miner
 
             touch -d "${ARCHIVE_EPOCH}" "${RAW_BIN}"
+            rm -rf "${PACKAGE_DIR}"
+            mkdir -p "${PACKAGE_DIR}"
+            cp "${RAW_BIN}" "${PACKAGE_DIR}/${PACKAGE_BIN}"
+            cp "config.example.json" "${PACKAGE_DIR}/config.example.json"
+            touch -d "${ARCHIVE_EPOCH}" "${PACKAGE_DIR}/${PACKAGE_BIN}"
+            touch -d "${ARCHIVE_EPOCH}" "${PACKAGE_DIR}/config.example.json"
 
             if [[ "${GOOS}" == "windows" ]]; then
               local ARCHIVE="xfo-miner-${PLATFORM_KEY}.zip"
-              (cd dist && zip -X -q -j "packages/${ARCHIVE}" "$(basename "${RAW_BIN}")")
+              (cd "${PACKAGE_DIR}" && zip -X -q "../packages/${ARCHIVE}" "${PACKAGE_BIN}" "config.example.json")
             else
               local ARCHIVE="xfo-miner-${PLATFORM_KEY}.tar.gz"
-              (cd dist && tar \
+              (cd "${PACKAGE_DIR}" && tar \
                 --sort=name \
                 --mtime="${ARCHIVE_EPOCH}" \
                 --owner=0 \
                 --group=0 \
                 --numeric-owner \
-                -czf "packages/${ARCHIVE}" "$(basename "${RAW_BIN}")")
+                -czf "../packages/${ARCHIVE}" "${PACKAGE_BIN}" "config.example.json")
             fi
           }
 
