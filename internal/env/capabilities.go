@@ -25,7 +25,7 @@ type SystemCapabilities struct {
 	RunMode        string
 }
 
-func ProbeAll(ctx context.Context, hashcatPath string) (*SystemCapabilities, error) {
+func ProbeAll(ctx context.Context, hashcatPath string, xmrigPath string) (*SystemCapabilities, error) {
 	caps := &SystemCapabilities{RunMode: RunModeCPUOnly}
 	warnings := make([]error, 0)
 	caps.IsRoot = CheckRoot()
@@ -48,7 +48,7 @@ func ProbeAll(ctx context.Context, hashcatPath string) (*SystemCapabilities, err
 		caps.HashcatVersion = hashcatInfo.Version
 	}
 
-	xmrigInfo, xmrigErr := DetectXMRig(ctx)
+	xmrigInfo, xmrigErr := DetectXMRig(ctx, xmrigPath)
 	if xmrigErr != nil {
 		warnings = append(warnings, xmrigErr)
 	}

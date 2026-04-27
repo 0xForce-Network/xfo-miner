@@ -554,6 +554,175 @@ func TestLoadConfigRejectsRuntimeOwnedIdentityFields(t *testing.T) {
 	}
 }
 
+func TestLoadConfigExplainsWindowsPathEscaping(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "windows-path-escape.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "",
+	  "worker_name": "worker-1",
+	  "pool_url": "",
+	  "hashcat_path": ".\hashcat.exe",
+	  "max_cpu_threads": 2,
+	  "cpu_mining": {
+	    "enabled": false,
+	    "xmrig_path": "",
+	    "stratum_url": "",
+	    "max_threads": 0,
+	    "background_threads": 0
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatalf("expected decode error for invalid windows path escaping")
+	} else if !strings.Contains(err.Error(), "strict JSON") {
+		t.Fatalf("expected strict JSON windows path hint, got %v", err)
+	}
+}
+
+func TestLoadConfigNormalizesWindowsExecutablePathsRelativeToConfigDir(t *testing.T) {
+	tempDir := t.TempDir()
+	origGOOS := executablePathNormalizeGOOS
+	executablePathNormalizeGOOS = "windows"
+	defer func() {
+		executablePathNormalizeGOOS = origGOOS
+	}()
+
+	hashcatPath := filepath.Join(tempDir, "hashcat.exe")
+	xmrigPath := filepath.Join(tempDir, "xmrig.exe")
+	idlePath := filepath.Join(tempDir, "idle.exe")
+	for _, p := range []string{hashcatPath, xmrigPath, idlePath} {
+		if err := os.WriteFile(p, []byte("stub"), 0o755); err != nil {
+			t.Fatalf("write stub executable %s: %v", p, err)
+		}
+	}
+
+	configPath := filepath.Join(tempDir, "config.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "",
+	  "worker_name": "worker-1",
+	  "pool_url": "",
+	  "hashcat_path": "hashcat.exe",
+	  "max_cpu_threads": 2,
+	  "cpu_mining": {
+	    "enabled": false,
+	    "xmrig_path": "xmrig.exe",
+	    "stratum_url": "",
+	    "max_threads": 0,
+	    "background_threads": 0
+	  },
+	  "idle_behavior": {
+	    "enabled": true,
+	    "grace_period_sec": 0,
+	    "command": "idle.exe",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if cfg.HashcatPath != hashcatPath {
+		t.Fatalf("expected hashcat path normalized to config dir, got %q want %q", cfg.HashcatPath, hashcatPath)
+	}
+	if cfg.CPUMining.XMRigPath != xmrigPath {
+		t.Fatalf("expected xmrig path normalized to config dir, got %q want %q", cfg.CPUMining.XMRigPath, xmrigPath)
+	}
+	if cfg.IdleBehavior.Command != idlePath {
+		t.Fatalf("expected idle command normalized to config dir, got %q want %q", cfg.IdleBehavior.Command, idlePath)
+	}
+}
+
+func TestLoadConfigNormalizesWindowsExecutablePathsWhenConfigPathIsRelative(t *testing.T) {
+	tempDir := t.TempDir()
+	origGOOS := executablePathNormalizeGOOS
+	executablePathNormalizeGOOS = "windows"
+	defer func() {
+		executablePathNormalizeGOOS = origGOOS
+	}()
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir tempDir: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(origWD); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	}()
+
+	hashcatPath := filepath.Join(tempDir, "hashcat.exe")
+	xmrigPath := filepath.Join(tempDir, "xmrig.exe")
+	for _, p := range []string{hashcatPath, xmrigPath} {
+		if err := os.WriteFile(p, []byte("stub"), 0o755); err != nil {
+			t.Fatalf("write stub executable %s: %v", p, err)
+		}
+	}
+
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
+	  "worker_name": "worker-1",
+	  "pool_url": "",
+	  "hashcat_path": "./hashcat.exe",
+	  "max_cpu_threads": 2,
+	  "cpu_mining": {
+	    "enabled": true,
+	    "xmrig_path": "./xmrig.exe",
+	    "stratum_url": "stratum+tcp://pool.example.com:3333",
+	    "max_threads": 1,
+	    "background_threads": 1
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile("config.json", []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig("./config.json")
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+
+	if cfg.HashcatPath != hashcatPath {
+		t.Fatalf("expected relative-config hashcat path normalized to absolute path, got %q want %q", cfg.HashcatPath, hashcatPath)
+	}
+	if cfg.CPUMining.XMRigPath != xmrigPath {
+		t.Fatalf("expected relative-config xmrig path normalized to absolute path, got %q want %q", cfg.CPUMining.XMRigPath, xmrigPath)
+	}
+	if !filepath.IsAbs(cfg.IdentityStatePath()) {
+		t.Fatalf("expected identity state path to be absolute, got %q", cfg.IdentityStatePath())
+	}
+}
+
 func TestLoadConfigHashcatPathDefault(t *testing.T) {
 	t.Parallel()
 

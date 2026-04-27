@@ -69,6 +69,12 @@ Descripción de campos:
   - `command`: Comando ejecutable del minero inactivo
   - `args`: Cadena de argumentos del minero inactivo
 
+Nota para rutas en Windows:
+- `config.json` usa JSON estricto, por lo que las rutas de Windows deben escribirse con `/` o con `\\` escapadas.
+- Ejemplos válidos:
+  - `"xmrig_path": "./xmrig.exe"`
+  - `"hashcat_path": "C:\\hashcat\\hashcat.exe"`
+
 Ver: `docs/config_reference.md`.
 
 ## Modos de Ejecución

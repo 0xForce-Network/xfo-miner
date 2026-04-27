@@ -69,6 +69,12 @@ Field descriptions:
   - `command`: Idle miner executable command
   - `args`: Idle miner argument string
 
+Windows path note:
+- `config.json` is strict JSON, so Windows paths must use forward slashes or escaped backslashes.
+- Valid examples:
+  - `"xmrig_path": "./xmrig.exe"`
+  - `"hashcat_path": "C:\\hashcat\\hashcat.exe"`
+
 See: `docs/config_reference.md`.
 
 ## Run Modes

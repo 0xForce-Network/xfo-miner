@@ -69,6 +69,12 @@ make release      # clean + checksums（完整發佈流程）
   - `command`：閒置礦工可執行命令
   - `args`：閒置礦工參數字串
 
+Windows 路徑注意事項：
+- `config.json` 是嚴格 JSON，因此 Windows 路徑必須使用 `/`，或把反斜線寫成跳脫後的 `\\`。
+- 有效範例：
+  - `"xmrig_path": "./xmrig.exe"`
+  - `"hashcat_path": "C:\\hashcat\\hashcat.exe"`
+
 詳見：`docs/config_reference.md`。
 
 ## 執行模式

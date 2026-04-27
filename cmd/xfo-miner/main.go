@@ -20,7 +20,7 @@ import (
 	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
-const version = "0.1.0"
+var version = "1.0.3"
 
 func main() {
 	configPath := flag.String("config", "./config.json", "path to config.json")
@@ -56,7 +56,7 @@ func main() {
 		"idle_enabled", cfg.IdleBehavior.Enabled,
 	)
 
-	capabilities, capErr := env.ProbeAll(context.Background(), cfg.HashcatPath)
+	capabilities, capErr := env.ProbeAll(context.Background(), cfg.HashcatPath, cfg.CPUMining.XMRigPath)
 	if capErr != nil {
 		logger.Warn("environment probe completed with warnings", "error", capErr)
 	}

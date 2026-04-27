@@ -138,8 +138,12 @@ func DetectDocker(ctx context.Context) (*DockerInfo, error) {
 	return &DockerInfo{Available: true, Version: strings.TrimSpace(output)}, nil
 }
 
-func DetectXMRig(ctx context.Context) (*XMRigInfo, error) {
-	output, err := runCommand(ctx, commandTimeout, "xmrig", "--version")
+func DetectXMRig(ctx context.Context, xmrigPath string) (*XMRigInfo, error) {
+	if strings.TrimSpace(xmrigPath) == "" {
+		xmrigPath = "xmrig"
+	}
+
+	output, err := runCommand(ctx, commandTimeout, xmrigPath, "--version")
 	if err != nil {
 		return &XMRigInfo{Available: false}, err
 	}

@@ -45,6 +45,7 @@ type identityState struct {
 
 var hostPlatformExecCommandContext = exec.CommandContext
 var hostPlatformGOOS = runtime.GOOS
+var executablePathNormalizeGOOS = runtime.GOOS
 
 type IdleBehavior struct {
 	Enabled        bool   `json:"enabled"`
@@ -152,7 +153,12 @@ func isValidXfoAddress(addr string) bool {
 }
 
 func LoadConfig(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
+	resolvedPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return nil, fmt.Errorf("resolve config path: %w", err)
+	}
+
+	raw, err := os.ReadFile(resolvedPath)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
@@ -161,13 +167,14 @@ func LoadConfig(path string) (*Config, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("decode config: %w", err)
+		return nil, annotateConfigDecodeError(err)
 	}
 
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
-	if err := cfg.ensureStableIdentity(path); err != nil {
+	cfg.normalizeExecutablePaths(filepath.Dir(resolvedPath))
+	if err := cfg.ensureStableIdentity(resolvedPath); err != nil {
 		return nil, err
 	}
 	if err := cfg.Validate(); err != nil {
@@ -175,6 +182,47 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func annotateConfigDecodeError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	message := err.Error()
+	if strings.Contains(message, "in string escape code") {
+		return fmt.Errorf("decode config: %w (hint: config.json is strict JSON; on Windows, write paths with forward slashes like ./xmrig.exe or escaped backslashes like .\\\\xmrig.exe)", err)
+	}
+
+	return fmt.Errorf("decode config: %w", err)
+}
+
+func (c *Config) normalizeExecutablePaths(configDir string) {
+	if executablePathNormalizeGOOS != "windows" {
+		return
+	}
+
+	c.HashcatPath = normalizeExecutablePathFromConfigDir(configDir, c.HashcatPath)
+	c.CPUMining.XMRigPath = normalizeExecutablePathFromConfigDir(configDir, c.CPUMining.XMRigPath)
+	c.IdleBehavior.Command = normalizeExecutablePathFromConfigDir(configDir, c.IdleBehavior.Command)
+}
+
+func normalizeExecutablePathFromConfigDir(configDir string, raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+
+	if filepath.IsAbs(trimmed) {
+		return trimmed
+	}
+
+	candidate := filepath.Clean(filepath.Join(configDir, trimmed))
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+
+	return trimmed
 }
 
 func (c *Config) ensureStableIdentity(configPath string) error {
