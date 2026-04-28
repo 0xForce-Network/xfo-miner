@@ -7,10 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
 )
+
+var currentGOOS = runtime.GOOS
 
 // Manager defines process lifecycle controls for managed subprocesses.
 type Manager interface {
@@ -108,6 +111,23 @@ func (m *RealManager) Stop(ctx context.Context, name string, gracePeriod time.Du
 
 	if gracePeriod <= 0 {
 		gracePeriod = m.defaultGraceTime
+	}
+
+	if currentGOOS == "windows" {
+		if err := proc.Kill(); err != nil {
+			if !errors.Is(err, syscall.ESRCH) {
+				return fmt.Errorf("kill process %q on windows: %w", name, err)
+			}
+		}
+
+		select {
+		case <-proc.Done:
+			m.remove(name)
+			m.logger.Info("process stopped on windows", "name", name)
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("wait after kill for %q canceled: %w", name, ctx.Err())
+		}
 	}
 
 	if err := proc.Signal(syscall.SIGTERM); err != nil {

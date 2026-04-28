@@ -20,7 +20,7 @@ import (
 	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
-var version = "1.0.4"
+var version = "1.0.5"
 
 func main() {
 	configPath := flag.String("config", "./config.json", "path to config.json")
@@ -47,6 +47,21 @@ func main() {
 		logger.Error("failed to load config", "path", *configPath, "error", err)
 		os.Exit(1)
 	}
+
+	instanceGuard, err := process.NewInstanceGuard(cfg.IdentityStatePath())
+	if err != nil {
+		logger.Error("failed to create single-instance guard", "error", err)
+		os.Exit(1)
+	}
+	if err := instanceGuard.Acquire(10 * time.Second); err != nil {
+		logger.Error("another xfo-miner instance is already running", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := instanceGuard.Release(); err != nil {
+			logger.Warn("failed to release single-instance guard", "error", err)
+		}
+	}()
 
 	logger.Info("config loaded",
 		"node_id", cfg.NodeID,

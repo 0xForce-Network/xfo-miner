@@ -117,6 +117,63 @@ func TestStopAll(t *testing.T) {
 	}
 }
 
+func TestStopWindowsPathUsesKillAndRemovesManagedProcess(t *testing.T) {
+	t.Parallel()
+
+	prevGOOS := currentGOOS
+	currentGOOS = "windows"
+	defer func() {
+		currentGOOS = prevGOOS
+	}()
+
+	mgr := newTestManager()
+	ctx := context.Background()
+
+	if _, err := mgr.Start(ctx, "win-stop", "sleep", []string{"30"}); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	if err := mgr.Stop(ctx, "win-stop", 200*time.Millisecond); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+
+	if mgr.IsRunning("win-stop") {
+		t.Fatalf("process should be stopped")
+	}
+
+	if _, ok := mgr.Get("win-stop"); ok {
+		t.Fatalf("process should be removed from manager after stop")
+	}
+}
+
+func TestStopAllWindowsPathStopsMultipleManagedProcesses(t *testing.T) {
+	t.Parallel()
+
+	prevGOOS := currentGOOS
+	currentGOOS = "windows"
+	defer func() {
+		currentGOOS = prevGOOS
+	}()
+
+	mgr := newTestManager()
+	ctx := context.Background()
+
+	if _, err := mgr.Start(ctx, "win-p1", "sleep", []string{"30"}); err != nil {
+		t.Fatalf("Start(win-p1) error = %v", err)
+	}
+	if _, err := mgr.Start(ctx, "win-p2", "sleep", []string{"30"}); err != nil {
+		t.Fatalf("Start(win-p2) error = %v", err)
+	}
+
+	if err := mgr.StopAll(ctx, 200*time.Millisecond); err != nil {
+		t.Fatalf("StopAll() error = %v", err)
+	}
+
+	if mgr.IsRunning("win-p1") || mgr.IsRunning("win-p2") {
+		t.Fatalf("all managed processes should be stopped on windows stop path")
+	}
+}
+
 func TestRealManagerCapturesSubprocessOutput(t *testing.T) {
 	t.Parallel()
 

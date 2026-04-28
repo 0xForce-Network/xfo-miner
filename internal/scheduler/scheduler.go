@@ -567,11 +567,10 @@ func (s *Scheduler) handleOTAUpdate(parentCtx context.Context, ota *pool.OTAUpda
 	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Minute)
 	defer cancel()
 
-	if err := s.stopIdleMiner(ctx); err != nil {
-		s.logger.Error("failed to stop idle miner before OTA", "error", err)
-	}
-	if err := s.xmrigManager.SetHeartbeatMode(ctx); err != nil {
-		s.logger.Error("failed to set xmrig heartbeat mode before OTA", "error", err)
+	if err := s.prepareForOTAHandoff(ctx); err != nil {
+		s.logger.Error("failed to quiesce miner runtime before OTA", "error", err)
+		s.restoreStandby(context.Background())
+		return
 	}
 
 	s.logger.Info("executing OTA update", "latest_version", ota.LatestVersion, "download_urls", ota.DownloadURLs)
@@ -582,6 +581,19 @@ func (s *Scheduler) handleOTAUpdate(parentCtx context.Context, ota *pool.OTAUpda
 	}
 
 	s.logger.Info("OTA update applied, process handoff should occur")
+}
+
+func (s *Scheduler) prepareForOTAHandoff(ctx context.Context) error {
+	if err := s.stopIdleMiner(ctx); err != nil {
+		return fmt.Errorf("stop idle miner before OTA: %w", err)
+	}
+	if err := s.xmrigManager.Stop(ctx); err != nil {
+		return fmt.Errorf("stop xmrig before OTA: %w", err)
+	}
+	if err := s.procManager.StopAll(ctx, 2*time.Second); err != nil {
+		return fmt.Errorf("stop managed subprocesses before OTA: %w", err)
+	}
+	return nil
 }
 
 func (s *Scheduler) handlePoolStatus(ctx context.Context, status string) {

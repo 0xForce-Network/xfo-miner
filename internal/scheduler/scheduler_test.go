@@ -30,6 +30,8 @@ type mockProcessManager struct {
 	running map[string]bool
 	starts  map[string]int
 	stops   map[string]int
+	stopAll int
+	stopErr error
 }
 
 type mockDetachedController struct {
@@ -103,7 +105,12 @@ func (m *mockProcessManager) Stop(_ context.Context, name string, _ time.Duratio
 	return nil
 }
 
-func (m *mockProcessManager) StopAll(_ context.Context, _ time.Duration) error { return nil }
+func (m *mockProcessManager) StopAll(_ context.Context, _ time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopAll++
+	return m.stopErr
+}
 func (m *mockProcessManager) Get(_ string) (*process.ManagedProcess, bool)     { return nil, false }
 func (m *mockProcessManager) IsRunning(name string) bool {
 	m.mu.Lock()
@@ -120,6 +127,12 @@ func (m *mockProcessManager) stopCount(name string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.stops[name]
+}
+
+func (m *mockProcessManager) stopAllCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stopAll
 }
 
 type mockPoolClient struct {
@@ -1890,7 +1903,7 @@ func TestSchedulerAlwaysStartsPoller(t *testing.T) {
 }
 
 func TestSchedulerRestoreStandbyAfterOTAFailure(t *testing.T) {
-	s, _, _, detached := newTestScheduler()
+	s, proc, _, detached := newTestScheduler()
 
 	xm := &mockXMRigController{}
 	s.xmrigManager = xm
@@ -1912,8 +1925,11 @@ func TestSchedulerRestoreStandbyAfterOTAFailure(t *testing.T) {
 	if s.CurrentState() != StateStandby {
 		t.Fatalf("expected standby after OTA failure, got %s", s.CurrentState())
 	}
-	if xm.heartbeatCount() < 1 {
-		t.Fatalf("expected xmrig heartbeat mode before OTA")
+	if xm.stopCalls < 1 {
+		t.Fatalf("expected xmrig stop before OTA")
+	}
+	if proc.stopAllCount() < 1 {
+		t.Fatalf("expected process manager stop-all before OTA")
 	}
 	if xm.fullCount() < 2 {
 		t.Fatalf("expected xmrig full mode restored after OTA failure, got %d", xm.fullCount())
@@ -1945,6 +1961,50 @@ func TestSchedulerOTAUsesParentContextCancellation(t *testing.T) {
 	}
 	if !errors.Is(ctxUpdater.contextErr(), context.Canceled) {
 		t.Fatalf("expected updater context canceled, got %v", ctxUpdater.contextErr())
+	}
+}
+
+func TestSchedulerOTAFailureDuringQuiesceRestoresStandbyAndSkipsUpdater(t *testing.T) {
+	s, proc, _, detached := newTestScheduler()
+
+	xm := &mockXMRigController{}
+	s.xmrigManager = xm
+	proc.stopErr = errors.New("stop all failed")
+
+	updaterCalls := 0
+	s.updater = otaUpdaterFunc(func(_ context.Context, _ *pool.OTAUpdateMessage) error {
+		updaterCalls++
+		return nil
+	})
+
+	if err := s.enterStandby(context.Background()); err != nil {
+		t.Fatalf("enterStandby() error = %v", err)
+	}
+
+	s.handleOTAUpdate(context.Background(), &pool.OTAUpdateMessage{
+		Type:          "update_required",
+		LatestVersion: "0.2.0",
+		DownloadURLs:  []string{"https://example.com/xfo-miner"},
+		Checksum:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+
+	if updaterCalls != 0 {
+		t.Fatalf("expected updater not called when OTA quiesce fails, got %d", updaterCalls)
+	}
+	if xm.stopCalls < 1 {
+		t.Fatalf("expected xmrig stop attempt during OTA quiesce")
+	}
+	if proc.stopAllCount() < 1 {
+		t.Fatalf("expected process manager stop-all attempt during OTA quiesce")
+	}
+	if s.CurrentState() != StateStandby {
+		t.Fatalf("expected standby state after OTA quiesce failure, got %s", s.CurrentState())
+	}
+	if xm.fullCount() < 2 {
+		t.Fatalf("expected xmrig full mode restored after OTA quiesce failure, got %d", xm.fullCount())
+	}
+	if detached.startCount() < 2 {
+		t.Fatalf("expected idle miner restarted after OTA quiesce failure")
 	}
 }
 

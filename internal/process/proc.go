@@ -84,6 +84,17 @@ func (p *ManagedProcess) Signal(sig os.Signal) error {
 	return p.Cmd.Process.Signal(sig)
 }
 
+func (p *ManagedProcess) Kill() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.started || p.Cmd == nil || p.Cmd.Process == nil {
+		return errors.New("process not running")
+	}
+
+	return p.Cmd.Process.Kill()
+}
+
 func (p *ManagedProcess) Wait() error {
 	<-p.Done
 	p.mu.Lock()
