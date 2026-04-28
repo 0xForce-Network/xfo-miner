@@ -6,6 +6,19 @@ import (
 	"errors"
 	"os"
 	"syscall"
+	"unsafe"
+)
+
+const (
+	lockfileExclusiveLock   = 0x00000002
+	lockfileFailImmediately = 0x00000001
+)
+
+var (
+	errorLockViolation = syscall.Errno(33)
+	kernel32DLL        = syscall.NewLazyDLL("kernel32.dll")
+	lockFileExProc     = kernel32DLL.NewProc("LockFileEx")
+	unlockFileExProc   = kernel32DLL.NewProc("UnlockFileEx")
 )
 
 func lockFile(f *os.File) error {
@@ -13,10 +26,20 @@ func lockFile(f *os.File) error {
 		return errors.New("nil lock file")
 	}
 	var ol syscall.Overlapped
-	err := syscall.LockFileEx(syscall.Handle(f.Fd()), syscall.LOCKFILE_EXCLUSIVE_LOCK|syscall.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ol)
-	if err != nil {
-		if errors.Is(err, syscall.ERROR_LOCK_VIOLATION) {
+	r1, _, err := lockFileExProc.Call(
+		f.Fd(),
+		uintptr(lockfileExclusiveLock|lockfileFailImmediately),
+		0,
+		1,
+		0,
+		uintptr(unsafe.Pointer(&ol)),
+	)
+	if r1 == 0 {
+		if errors.Is(err, errorLockViolation) {
 			return errInstanceAlreadyRunning
+		}
+		if err == syscall.Errno(0) {
+			return syscall.EINVAL
 		}
 		return err
 	}
@@ -28,5 +51,18 @@ func unlockFile(f *os.File) error {
 		return nil
 	}
 	var ol syscall.Overlapped
-	return syscall.UnlockFileEx(syscall.Handle(f.Fd()), 0, 1, 0, &ol)
+	r1, _, err := unlockFileExProc.Call(
+		f.Fd(),
+		0,
+		1,
+		0,
+		uintptr(unsafe.Pointer(&ol)),
+	)
+	if r1 == 0 {
+		if err == syscall.Errno(0) {
+			return syscall.EINVAL
+		}
+		return err
+	}
+	return nil
 }
