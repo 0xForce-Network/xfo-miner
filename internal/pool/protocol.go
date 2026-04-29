@@ -48,14 +48,15 @@ type LegacyClaim struct {
 }
 
 type GPUIdentity struct {
-	DeviceIndex       int    `json:"device_index"`
-	VendorID          string `json:"vendor_id,omitempty"`
-	DeviceID          string `json:"device_id,omitempty"`
-	UUIDSource        string `json:"uuid_source,omitempty"`
-	GPUUUID           string `json:"gpu_uuid,omitempty"`
-	DeviceFingerprint string `json:"device_fingerprint,omitempty"`
-	PCIBusID          string `json:"pci_bus_id,omitempty"`
-	GPUModel          string `json:"gpu_model,omitempty"`
+	DeviceIndex       int     `json:"device_index"`
+	VendorID          string  `json:"vendor_id,omitempty"`
+	DeviceID          string  `json:"device_id,omitempty"`
+	UUIDSource        string  `json:"uuid_source,omitempty"`
+	GPUUUID           string  `json:"gpu_uuid,omitempty"`
+	DeviceFingerprint string  `json:"device_fingerprint,omitempty"`
+	PCIBusID          string  `json:"pci_bus_id,omitempty"`
+	GPUModel          string  `json:"gpu_model,omitempty"`
+	VRAMGB            float64 `json:"vram_gb,omitempty"`
 }
 
 type HeartbeatMessage struct {

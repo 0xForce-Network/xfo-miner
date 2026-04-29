@@ -42,6 +42,7 @@ type openCLIdentity struct {
 	VendorID    string
 	DeviceID    string
 	PCIBusID    string
+	VRAMBytes   int64
 }
 
 func ScanGPUs() ([]GPUDevice, error) {
@@ -70,7 +71,7 @@ func ScanGPUs() ([]GPUDevice, error) {
 					GPUUUID:           identity.GPUUUID,
 					DeviceFingerprint: buildDeviceFingerprint(identity.VendorID, identity.DeviceID, identity.PCIBusID, identity.GPUUUID, identity.DeviceName),
 					GPUModel:          identity.DeviceName,
-					VRAMGB:            0,
+					VRAMGB:            vramBytesToGB(identity.VRAMBytes),
 					Status:            "idle",
 					ReputationScore:   50.0,
 					PCIBusID:          identity.PCIBusID,
@@ -131,13 +132,7 @@ func ScanGPUs() ([]GPUDevice, error) {
 
 func detectGPUIdentities() ([]openCLIdentity, string, error) {
 	if identities, err := detectOpenCLIdentities(); err == nil && len(identities) > 0 {
-		source := "opencl_uuid_khr"
-		if currentGOOS == "windows" {
-			source = "windows_opencl_uuid_khr"
-		} else if currentGOOS == "darwin" {
-			source = "mac_opencl_uuid_khr"
-		}
-		return identities, source, nil
+		return identities, "opencl_uuid_khr", nil
 	}
 
 	if currentGOOS == "windows" {
@@ -215,6 +210,12 @@ func detectOpenCLIdentities() ([]openCLIdentity, error) {
 		}
 		if strings.Contains(lower, "pci bus") {
 			current.PCIBusID = strings.TrimSpace(extractValue(trimmed))
+			continue
+		}
+		if strings.Contains(lower, "global memory size") {
+			if vramBytes := parseOpenCLMemoryBytes(trimmed); vramBytes > 0 {
+				current.VRAMBytes = vramBytes
+			}
 			continue
 		}
 	}
@@ -380,6 +381,34 @@ func normalizeHexString(value string) string {
 		}
 	}
 	return string(b)
+}
+
+func parseOpenCLMemoryBytes(value string) int64 {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0
+	}
+	if idx := strings.Index(trimmed, ":"); idx >= 0 {
+		trimmed = strings.TrimSpace(trimmed[idx+1:])
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return 0
+	}
+	for _, field := range fields {
+		parsed, err := strconv.ParseInt(strings.Trim(field, "(),"), 10, 64)
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func vramBytesToGB(bytes int64) float64 {
+	if bytes <= 0 {
+		return 0
+	}
+	return float64(bytes) / (1024.0 * 1024.0 * 1024.0)
 }
 
 func buildDeviceFingerprint(vendorID, deviceID, pciBusID, gpuUUID, gpuModel string) string {

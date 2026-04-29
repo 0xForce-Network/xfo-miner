@@ -272,9 +272,11 @@ func (s *Scheduler) prepareLoginDevices() error {
 			DeviceFingerprint: d.DeviceFingerprint,
 			PCIBusID:          d.PCIBusID,
 			GPUModel:          d.GPUModel,
+			VRAMGB:            d.VRAMGB,
 		})
 	}
 	s.loginDevices = identities
+	s.logger.Info("prepared stable gpu identities", "device_count", len(identities))
 	return nil
 }
 

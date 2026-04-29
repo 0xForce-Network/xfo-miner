@@ -171,3 +171,16 @@ func TestParseLikelyHexIDRejectsVendorNames(t *testing.T) {
 		t.Fatalf("expected hex id 10de, got %q", got)
 	}
 }
+
+func TestParseOpenCLMemoryBytesHandlesClinfoFormats(t *testing.T) {
+	const expected = int64(17163091968)
+	for _, input := range []string{
+		"Global memory size: 17163091968",
+		"Global memory size 17163091968 (15.99GiB)",
+		"CL_DEVICE_GLOBAL_MEM_SIZE 17163091968",
+	} {
+		if got := parseOpenCLMemoryBytes(input); got != expected {
+			t.Fatalf("parseOpenCLMemoryBytes(%q)=%d want %d", input, got, expected)
+		}
+	}
+}

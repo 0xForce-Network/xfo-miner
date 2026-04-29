@@ -20,7 +20,7 @@ import (
 	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
-var version = "1.0.5"
+var version = "1.0.6"
 
 func main() {
 	configPath := flag.String("config", "./config.json", "path to config.json")
