@@ -8,10 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
 	"github.com/0xforce/xfo-miner/internal/config"
+	"github.com/0xforce/xfo-miner/internal/debuglog"
 	"github.com/0xforce/xfo-miner/internal/env"
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
@@ -20,10 +23,14 @@ import (
 	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
-var version = "1.0.6"
+var version = "1.0.7"
+var gitCommit = "dev"
+var buildTime = "unknown"
 
 func main() {
 	configPath := flag.String("config", "./config.json", "path to config.json")
+	debug := flag.Bool("debug", false, "enable debug mode and disable forced OTA")
+	debugVerbose := flag.Bool("debug-verbose", false, "enable verbose debug miner diagnostics (requires --debug)")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification (testnet only)")
 	logDir := flag.String("log-dir", "", "directory to write subprocess log files (xmrig, idle miner, etc.)")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -40,6 +47,23 @@ func main() {
 	printBanner(logger)
 	if err := updater.CleanupOldBinary(); err != nil {
 		logger.Warn("failed to cleanup old OTA binary artifact", "error", err)
+	}
+	resolvedConfigPath, err := filepath.Abs(filepath.Clean(*configPath))
+	if err != nil {
+		logger.Error("failed to resolve config path", "path", *configPath, "error", err)
+		os.Exit(1)
+	}
+	if *debug {
+		debugPath := filepath.Join(filepath.Dir(resolvedConfigPath), "debug.log")
+		if err := debuglog.Enable(debugPath, *debugVerbose); err != nil {
+			logger.Error("failed to initialize debug log", "path", debugPath, "error", err)
+			os.Exit(1)
+		}
+		defer func() {
+			if err := debuglog.Close(); err != nil {
+				logger.Warn("failed to close debug log", "error", err)
+			}
+		}()
 	}
 
 	cfg, err := config.LoadConfig(*configPath)
@@ -69,7 +93,25 @@ func main() {
 		"pool_url", cfg.PoolURL,
 		"max_cpu_threads", cfg.MaxCPUThreads,
 		"idle_enabled", cfg.IdleBehavior.Enabled,
+		"debug", *debug,
 	)
+	if *debug {
+		logger.Warn("debug mode enabled; forced OTA is disabled")
+		debuglog.Log("debug_mode_enabled",
+			"ota_disabled", true,
+			"debug_verbose", *debugVerbose,
+			"miner_version", version,
+			"git_commit", gitCommit,
+			"build_time", buildTime,
+			"os", runtime.GOOS,
+			"arch", runtime.GOARCH,
+			"config_path", resolvedConfigPath,
+			"debug_log_path", debuglog.Path(),
+			"pool_url", cfg.PoolURL,
+			"worker_name", cfg.WorkerName,
+			"wallet_suffix", maskWalletSuffix(cfg.WalletAddress),
+		)
+	}
 
 	capabilities, capErr := env.ProbeAll(context.Background(), cfg.HashcatPath, cfg.CPUMining.XMRigPath)
 	if capErr != nil {
@@ -128,6 +170,9 @@ func main() {
 	}
 
 	s := scheduler.New(cfg, version, capabilities, process.NewRealManager(logger, process.WithLogDir(*logDir)), poolClient, logger)
+	s.SetDebugMode(*debug)
+	s.SetDebugBuildInfo(gitCommit, buildTime)
+	s.SetOTAHandoffStartedHook(instanceGuard.Release)
 	if err := s.Run(ctx); err != nil {
 		logger.Error("scheduler exited with error", "error", err)
 		os.Exit(1)
@@ -148,6 +193,8 @@ USAGE:
 
 CLI FLAGS:
   --config <path>      Path to config.json (default: ./config.json)
+  --debug              Enable debug mode and disable forced OTA
+  --debug-verbose      Enable verbose debug miner diagnostics (requires --debug)
   --insecure           Skip TLS certificate verification (testnet only)
   --log-dir <path>     Directory to write subprocess log files (xmrig, idle miner, etc.)
   --version            Print version and exit
@@ -177,10 +224,20 @@ CONFIG FILE PARAMETERS (config.json):
 
 EXAMPLES:
   xfo-miner --config /etc/xfo/config.json
+  xfo-miner --config ./config.json --debug
+  xfo-miner --config ./config.json --debug --debug-verbose
   xfo-miner --config ./config.json --insecure --log-dir /var/log/xfo
   xfo-miner --version
 
 See config.example.json for a full configuration template.
 `
 	fmt.Print(help)
+}
+
+func maskWalletSuffix(wallet string) string {
+	trimmed := filepath.Base(wallet)
+	if len(trimmed) <= 8 {
+		return trimmed
+	}
+	return trimmed[len(trimmed)-8:]
 }

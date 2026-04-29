@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/0xforce/xfo-miner/internal/debuglog"
 	"github.com/0xforce/xfo-miner/internal/pool"
 )
 
@@ -52,6 +53,7 @@ func (r *Reporter) ReportL1(_ context.Context, report L1Report) error {
 
 func (r *Reporter) ReportL2(_ context.Context, report L2Report) error {
 	devices := make([]pool.GPUDeviceTelemetry, 0, len(report.Devices))
+	debugDevices := make([]debuglog.DeviceSummary, 0, len(report.Devices))
 	for _, d := range report.Devices {
 		devices = append(devices, pool.GPUDeviceTelemetry{
 			DeviceID:          d.DeviceID,
@@ -68,7 +70,31 @@ func (r *Reporter) ReportL2(_ context.Context, report L2Report) error {
 			Temperature:       d.Temperature,
 			Utilization:       d.Utilization,
 		})
+		isVirtual, virtualReason := debuglog.ClassifyVirtualAdapter(d.GPUModel, d.PCIBusID)
+		debugDevices = append(debugDevices, debuglog.DeviceSummary{
+			GPUModel:          d.GPUModel,
+			GPUUUID:           d.GPUUUID,
+			UUIDSource:        d.UUIDSource,
+			DeviceFingerprint: d.DeviceFingerprint,
+			PCIBusID:          d.PCIBusID,
+			VendorID:          d.VendorID,
+			DeviceID:          d.DeviceID,
+			DeviceIndex:       d.DeviceIndex,
+			VRAMGB:            d.VRAMGB,
+			VRAMBytes:         d.VRAMBytes,
+			IdentityStable:    d.GPUUUID != "" || d.DeviceFingerprint != "",
+			IsVirtual:         isVirtual,
+			VirtualReason:     virtualReason,
+		})
 	}
+	debuglog.LogPayloadDiagnostics("telemetry_l2", report.WorkerID, "", debugDevices)
+	debuglog.Log("telemetry_l2_sent",
+		"worker_id", report.WorkerID,
+		"miner_id", debuglog.CurrentMinerID(),
+		"timestamp", report.Timestamp,
+		"devices_count", len(debugDevices),
+		"job_id", report.JobID,
+	)
 	return r.pool.SendTelemetryL2(&pool.TelemetryL2Message{Type: "telemetry_l2", Devices: devices, JobID: report.JobID})
 }
 
@@ -102,6 +128,7 @@ func (r *Reporter) RunL2Loop(ctx context.Context) {
 			devices, err := ScanGPUs()
 			if err != nil {
 				r.logger.Warn("telemetry gpu scan failed", "error", err)
+				debuglog.Log("telemetry_gpu_scan_failed", "error", err, "miner_id", debuglog.CurrentMinerID())
 				continue
 			}
 			_ = r.ReportL2(ctx, L2Report{WorkerID: r.workerID, Devices: devices, Timestamp: time.Now().Unix()})

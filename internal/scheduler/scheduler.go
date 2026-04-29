@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/0xforce/xfo-miner/internal/config"
+	"github.com/0xforce/xfo-miner/internal/debuglog"
 	"github.com/0xforce/xfo-miner/internal/env"
 	"github.com/0xforce/xfo-miner/internal/forensic"
 	"github.com/0xforce/xfo-miner/internal/identity"
@@ -47,6 +48,10 @@ type otaUpdater interface {
 
 type otaPoller interface {
 	Run(context.Context) error
+}
+
+type otaHandoffHookSetter interface {
+	SetHandoffStartedHook(func() error)
 }
 
 type forensicSandbox interface {
@@ -86,6 +91,11 @@ type Scheduler struct {
 	targetCache     targetCache
 	dictionaryCache dictionaryCache
 	forensicSandbox forensicSandbox
+	debugMode       bool
+	debugGitCommit  string
+	debugBuildTime  string
+	reconnectCount  int
+	loginDebugData  []debuglog.DeviceSummary
 
 	taskMu        sync.RWMutex
 	activeWPATask bool
@@ -162,12 +172,35 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		}
 	})
 	s.poolClient.OnReconnect(func() {
+		s.stateMu.Lock()
+		if s.debugMode {
+			s.reconnectCount++
+			debuglog.Log("pool_reconnect",
+				"reconnect_count", s.reconnectCount,
+				"miner_id", debuglog.CurrentMinerID(),
+				"devices_count", len(s.loginDebugData),
+			)
+		}
+		s.stateMu.Unlock()
 		s.logger.Info("L2 pool reconnected, re-sending login")
+		if s.isDebugMode() {
+			debuglog.LogPayloadDiagnostics("login", s.cfg.WorkerName, s.version, append([]debuglog.DeviceSummary(nil), s.loginDebugData...))
+		}
 		if err := s.poolClient.SendLogin(s.buildLoginMessage()); err != nil {
 			s.logger.Warn("failed to re-send login after reconnection", "error", err)
+			if s.isDebugMode() {
+				debuglog.Log("relogin_failed", "error", err, "reconnect_count", s.reconnectCount)
+			}
 			return
 		}
 		s.logger.Info("login re-sent successfully after reconnection")
+		if s.isDebugMode() {
+			debuglog.Log("relogin_sent",
+				"reconnect_count", s.reconnectCount,
+				"devices_count", len(s.loginDebugData),
+				"miner_id", debuglog.CurrentMinerID(),
+			)
+		}
 	})
 
 	login := s.buildLoginMessage()
@@ -195,7 +228,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 	defer func() {
 		_ = s.stopIdleMiner(context.Background())
-		_ = s.xmrigManager.Stop(context.Background())
+		_ = s.xmrigManager.Shutdown(context.Background())
 		_ = s.procManager.StopAll(context.Background(), 2*time.Second)
 		_ = s.poolClient.Close()
 	}()
@@ -276,11 +309,41 @@ func (s *Scheduler) prepareLoginDevices() error {
 		})
 	}
 	s.loginDevices = identities
+	debugDevices := make([]debuglog.DeviceSummary, 0, len(devices))
+	for _, d := range devices {
+		isVirtual, virtualReason := debuglog.ClassifyVirtualAdapter(d.GPUModel, d.PCIBusID)
+		debugDevices = append(debugDevices, debuglog.DeviceSummary{
+			GPUModel:          d.GPUModel,
+			GPUUUID:           d.GPUUUID,
+			UUIDSource:        d.UUIDSource,
+			DeviceFingerprint: d.DeviceFingerprint,
+			PCIBusID:          d.PCIBusID,
+			VendorID:          d.VendorID,
+			DeviceID:          d.DeviceID,
+			DeviceIndex:       d.DeviceIndex,
+			VRAMGB:            d.VRAMGB,
+			VRAMBytes:         d.VRAMBytes,
+			IdentityStable:    strings.TrimSpace(d.GPUUUID) != "" || strings.TrimSpace(d.DeviceFingerprint) != "",
+			IsVirtual:         isVirtual,
+			VirtualReason:     virtualReason,
+		})
+	}
+	s.stateMu.Lock()
+	s.loginDebugData = append([]debuglog.DeviceSummary(nil), debugDevices...)
+	s.stateMu.Unlock()
+	if s.isDebugMode() {
+		debuglog.LogPayloadDiagnostics("login", s.cfg.WorkerName, s.version, debugDevices)
+	}
 	s.logger.Info("prepared stable gpu identities", "device_count", len(identities))
 	return nil
 }
 
 func (s *Scheduler) startOTAPoller(ctx context.Context) {
+	if s.isDebugMode() {
+		s.logger.Info("debug mode enabled; skipping OTA poller startup")
+		return
+	}
+
 	semver := normalizeSemverLike(s.version)
 	currentVer, err := updater.ParseVersion(semver)
 	if err != nil {
@@ -345,6 +408,36 @@ func (s *Scheduler) CurrentPoolStatus() string {
 	s.poolStatusMu.RLock()
 	defer s.poolStatusMu.RUnlock()
 	return s.poolStatus
+}
+
+func (s *Scheduler) SetDebugMode(enabled bool) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.debugMode = enabled
+}
+
+func (s *Scheduler) SetDebugBuildInfo(gitCommit string, buildTime string) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.debugGitCommit = strings.TrimSpace(gitCommit)
+	s.debugBuildTime = strings.TrimSpace(buildTime)
+}
+
+func (s *Scheduler) SetOTAHandoffStartedHook(fn func() error) {
+	if s == nil || s.updater == nil {
+		return
+	}
+	setter, ok := s.updater.(otaHandoffHookSetter)
+	if !ok {
+		return
+	}
+	setter.SetHandoffStartedHook(fn)
+}
+
+func (s *Scheduler) isDebugMode() bool {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.debugMode
 }
 
 func (s *Scheduler) setState(state State) {
@@ -434,6 +527,11 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 		var ota pool.OTAUpdateMessage
 		if err := json.Unmarshal(msg.raw, &ota); err != nil {
 			s.logger.Warn("invalid update_required message", "error", err)
+			return
+		}
+		if s.isDebugMode() {
+			s.logger.Warn("debug mode enabled; ignoring forced OTA request", "latest_version", ota.LatestVersion)
+			debuglog.Log("ota_ignored_debug_mode", "latest_version", ota.LatestVersion, "download_urls", ota.DownloadURLs)
 			return
 		}
 		s.handleOTAUpdate(ctx, &ota)
@@ -529,6 +627,20 @@ func isWASMBytes(payload []byte) bool {
 func (s *Scheduler) handleLoginAck(ack *pool.LoginAckMessage) {
 	if ack == nil {
 		return
+	}
+	if s.isDebugMode() {
+		if strings.TrimSpace(ack.MinerID) != "" {
+			debuglog.SetMinerID(ack.MinerID)
+		}
+		debuglog.Log("login_ack",
+			"miner_id", ack.MinerID,
+			"status", ack.Status,
+			"verification_required", ack.VerificationRequired,
+			"verification_epoch_id", ack.VerificationEpochID,
+			"verification_state", ack.VerificationState,
+			"migration_status", ack.MigrationStatus,
+			"stake_recovered", ack.StakeRecovered,
+		)
 	}
 
 	if ack.VerificationRequired {

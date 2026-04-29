@@ -18,6 +18,24 @@ import (
 	"github.com/0xforce/xfo-miner/internal/pool"
 )
 
+type fakeHandoffProcess struct {
+	waitCode   int
+	waitErr    error
+	killErr    error
+	waitCalls  int
+	killCalls  int
+}
+
+func (p *fakeHandoffProcess) Wait() (int, error) {
+	p.waitCalls++
+	return p.waitCode, p.waitErr
+}
+
+func (p *fakeHandoffProcess) Kill() error {
+	p.killCalls++
+	return p.killErr
+}
+
 func testUpdater(t *testing.T) *Updater {
 	t.Helper()
 	return testUpdaterWithExecutableName(t, "xfo-miner")
@@ -213,5 +231,61 @@ func TestExecuteRejectsNonHTTPSURL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "non-https") {
 		t.Fatalf("expected non-https rejection, got %v", err)
+	}
+}
+
+func TestCompleteWindowsHandoffWaitsAndPropagatesExitCode(t *testing.T) {
+	t.Parallel()
+
+	u := testUpdater(t)
+	proc := &fakeHandoffProcess{waitCode: 7}
+	exitCode := -1
+	hookCalls := 0
+	u.exitFunc = func(code int) {
+		exitCode = code
+	}
+	u.SetHandoffStartedHook(func() error {
+		hookCalls++
+		return nil
+	})
+
+	if err := u.completeWindowsHandoff(proc); err != nil {
+		t.Fatalf("completeWindowsHandoff() error = %v", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("expected hook to be called once, got %d", hookCalls)
+	}
+	if proc.waitCalls != 1 {
+		t.Fatalf("expected wait to be called once, got %d", proc.waitCalls)
+	}
+	if proc.killCalls != 0 {
+		t.Fatalf("expected kill not to be called, got %d", proc.killCalls)
+	}
+	if exitCode != 7 {
+		t.Fatalf("expected propagated exit code 7, got %d", exitCode)
+	}
+}
+
+func TestCompleteWindowsHandoffKillsProcessWhenHookFails(t *testing.T) {
+	t.Parallel()
+
+	u := testUpdater(t)
+	proc := &fakeHandoffProcess{waitCode: 0}
+	u.SetHandoffStartedHook(func() error {
+		return errors.New("release guard failed")
+	})
+
+	err := u.completeWindowsHandoff(proc)
+	if err == nil {
+		t.Fatalf("expected completeWindowsHandoff() to fail")
+	}
+	if !strings.Contains(err.Error(), "release guard failed") {
+		t.Fatalf("expected hook failure in error, got %v", err)
+	}
+	if proc.killCalls != 1 {
+		t.Fatalf("expected kill to be called once, got %d", proc.killCalls)
+	}
+	if proc.waitCalls != 1 {
+		t.Fatalf("expected wait to be called once after kill, got %d", proc.waitCalls)
 	}
 }

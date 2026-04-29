@@ -26,6 +26,37 @@ type Updater struct {
 	environ        []string
 	exitFunc       func(int)
 	swapFn         func(context.Context, string) error
+	onHandoffStarted func() error
+}
+
+type handoffProcess interface {
+	Wait() (int, error)
+	Kill() error
+}
+
+type osHandoffProcess struct {
+	proc *os.Process
+}
+
+func (p osHandoffProcess) Wait() (int, error) {
+	if p.proc == nil {
+		return 0, errors.New("handoff process is nil")
+	}
+	state, err := p.proc.Wait()
+	if err != nil {
+		return 0, err
+	}
+	if state == nil {
+		return 0, nil
+	}
+	return state.ExitCode(), nil
+}
+
+func (p osHandoffProcess) Kill() error {
+	if p.proc == nil {
+		return errors.New("handoff process is nil")
+	}
+	return p.proc.Kill()
 }
 
 const oldBinarySuffix = ".old.tmp"
@@ -64,6 +95,35 @@ func New(logger *slog.Logger) (*Updater, error) {
 	u.swapFn = u.swapBinary
 
 	return u, nil
+}
+
+func (u *Updater) SetHandoffStartedHook(fn func() error) {
+	if u == nil {
+		return
+	}
+	u.onHandoffStarted = fn
+
+}
+
+func (u *Updater) completeWindowsHandoff(proc handoffProcess) error {
+	if proc == nil {
+		return errors.New("handoff process is nil")
+	}
+	if u != nil && u.onHandoffStarted != nil {
+		if err := u.onHandoffStarted(); err != nil {
+			_ = proc.Kill()
+			_, _ = proc.Wait()
+			return fmt.Errorf("run handoff started hook: %w", err)
+		}
+	}
+	code, err := proc.Wait()
+	if err != nil {
+		return fmt.Errorf("wait updated process: %w", err)
+	}
+	if u != nil && u.exitFunc != nil {
+		u.exitFunc(code)
+	}
+	return nil
 }
 
 func (u *Updater) Execute(ctx context.Context, ota *pool.OTAUpdateMessage) error {

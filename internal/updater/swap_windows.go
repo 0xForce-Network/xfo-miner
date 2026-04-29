@@ -40,9 +40,9 @@ func (u *Updater) swapBinary(ctx context.Context, downloadedFile string) error {
 		_ = os.Rename(oldPath, u.executablePath)
 		return fmt.Errorf("start updated process: %w", err)
 	}
-	_ = proc.Release()
-
-	u.exitFunc(0)
+	if err := u.completeWindowsHandoff(osHandoffProcess{proc: proc}); err != nil {
+		return fmt.Errorf("complete windows ota handoff: %w", err)
+	}
 	return nil
 }
 

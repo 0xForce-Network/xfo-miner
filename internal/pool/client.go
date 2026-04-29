@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0xforce/xfo-miner/internal/debuglog"
 	"github.com/gorilla/websocket"
 )
 
@@ -256,6 +257,7 @@ func (c *WSSClient) writeLoop(ctx context.Context, conn *websocket.Conn, errCh c
 				errCh <- err
 				return
 			}
+			debuglog.Log("heartbeat_sent", "miner_id", debuglog.CurrentMinerID(), "timestamp", time.Now().Unix())
 		case <-pingTicker.C:
 			if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second)); err != nil {
 				errCh <- err
@@ -284,6 +286,7 @@ func (c *WSSClient) SendLogin(login *LoginMessage) error {
 	if login.Type == "" {
 		login.Type = "login"
 	}
+	debuglog.Log("login_enqueued", "devices_count", len(login.Devices), "worker_name", login.WorkerName)
 	return c.enqueue(login)
 }
 
@@ -348,6 +351,7 @@ func (c *WSSClient) SendTelemetryL2(msg *TelemetryL2Message) error {
 	if msg.Type == "" {
 		msg.Type = "telemetry_l2"
 	}
+	debuglog.Log("telemetry_l2_enqueued", "devices_count", len(msg.Devices), "miner_id", debuglog.CurrentMinerID(), "job_id", msg.JobID)
 	return c.enqueue(msg)
 }
 

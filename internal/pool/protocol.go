@@ -173,6 +173,7 @@ type PoolStatusMessage struct {
 
 type LoginAckMessage struct {
 	Type                       string `json:"type"`
+	MinerID                    string `json:"miner_id,omitempty"`
 	Status                     string `json:"status"`
 	VerificationRequired       bool   `json:"verification_required,omitempty"`
 	VerificationEpochID        string `json:"verification_epoch_id,omitempty"`

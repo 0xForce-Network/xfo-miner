@@ -33,6 +33,7 @@ type mockXMRigManager struct {
 	fullCalls      int
 	heartbeatCalls int
 	stopCalls      int
+	shutdownCalls  int
 }
 
 func (m *mockXMRigManager) Start(_ context.Context) error {
@@ -60,6 +61,13 @@ func (m *mockXMRigManager) Stop(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopCalls++
+	return nil
+}
+
+func (m *mockXMRigManager) Shutdown(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shutdownCalls++
 	return nil
 }
 
@@ -538,5 +546,58 @@ func TestXMRigManagerRejectsReservedExtraArgs(t *testing.T) {
 
 	if err := mgr.Start(context.Background()); err == nil {
 		t.Fatalf("expected Start() to reject reserved extra args")
+	}
+}
+
+func TestXMRigManagerStopAllowsSubsequentRestart(t *testing.T) {
+	t.Parallel()
+
+	proc := newMockProcessManager()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewXMRigManager(proc, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+	}, "stratum+tcp://pool.example:3333", testWalletAddress, "node-1", "worker-1", logger)
+
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := mgr.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if err := mgr.SetFullMode(context.Background()); err != nil {
+		t.Fatalf("SetFullMode() after Stop error = %v", err)
+	}
+
+	if got := proc.startCount(xmrigProcessName); got != 2 {
+		t.Fatalf("expected xmrig to be started twice, got %d", got)
+	}
+	if got := proc.stopCount(xmrigProcessName); got != 1 {
+		t.Fatalf("expected xmrig to be stopped once, got %d", got)
+	}
+}
+
+func TestXMRigManagerShutdownPreventsRestart(t *testing.T) {
+	t.Parallel()
+
+	proc := newMockProcessManager()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewXMRigManager(proc, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+	}, "stratum+tcp://pool.example:3333", testWalletAddress, "node-1", "worker-1", logger)
+
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := mgr.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if err := mgr.SetFullMode(context.Background()); err == nil {
+		t.Fatalf("expected SetFullMode() after Shutdown to fail")
 	}
 }

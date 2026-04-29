@@ -394,6 +394,7 @@ type mockXMRigController struct {
 	fullCalls      int
 	startCalls     int
 	stopCalls      int
+	shutdownCalls  int
 }
 
 func (m *mockXMRigController) Start(_ context.Context) error {
@@ -421,6 +422,13 @@ func (m *mockXMRigController) Stop(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopCalls++
+	return nil
+}
+
+func (m *mockXMRigController) Shutdown(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.shutdownCalls++
 	return nil
 }
 
@@ -1756,6 +1764,33 @@ func TestSchedulerHandlesOTAUpdateRequiredWithoutUserConfigurableAutoUpdateBlock
 	waitFor(t, func() bool { return mockUpdater.callCount() >= 1 })
 }
 
+func TestSchedulerDebugModeIgnoresForcedOTARequest(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.SetDebugMode(true)
+	mockUpdater, ok := s.updater.(*mockOTAUpdater)
+	if !ok {
+		t.Fatalf("expected mock ota updater")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.OTAUpdateMessage{
+		Type:          "update_required",
+		LatestVersion: "0.2.0",
+		DownloadURLs:  []string{"https://example.com/xfo-miner"},
+		Checksum:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+
+	time.Sleep(150 * time.Millisecond)
+	if got := mockUpdater.callCount(); got != 0 {
+		t.Fatalf("expected updater to be skipped in debug mode, got %d calls", got)
+	}
+}
+
 func TestSchedulerRunConnectFailDoesNotExitFatal(t *testing.T) {
 	s, _, pcl, detached := newTestScheduler()
 	pcl.connectErr = context.DeadlineExceeded
@@ -1889,6 +1924,37 @@ func TestSchedulerAlwaysStartsPoller(t *testing.T) {
 	waitFor(t, func() bool { return created >= 1 })
 	if created != 1 {
 		t.Fatalf("expected poller to be created once with hardcoded OTA settings, got %d", created)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not exit after context cancel")
+	}
+}
+
+func TestSchedulerDebugModeSkipsPollerStartup(t *testing.T) {
+	s, _, _, detached := newTestScheduler()
+	s.SetDebugMode(true)
+
+	created := 0
+	s.newPoller = func(_ updater.Version, _ func(context.Context, *pool.OTAUpdateMessage) error) otaPoller {
+		created++
+		return &mockOTAPoller{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(ctx) }()
+
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+	time.Sleep(150 * time.Millisecond)
+	if created != 0 {
+		t.Fatalf("expected poller not to be created in debug mode, got %d", created)
 	}
 
 	cancel()

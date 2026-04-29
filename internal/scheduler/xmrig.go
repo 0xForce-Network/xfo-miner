@@ -27,6 +27,7 @@ type xmrigController interface {
 	SetFullMode(context.Context) error
 	SetHeartbeatMode(context.Context) error
 	Stop(context.Context) error
+	Shutdown(context.Context) error
 }
 
 type XMRigManager struct {
@@ -110,12 +111,27 @@ func (m *XMRigManager) SetHeartbeatMode(ctx context.Context) error {
 }
 
 func (m *XMRigManager) Stop(ctx context.Context) error {
+	if !m.cfg.Enabled {
+		return nil
+	}
+	m.mu.Lock()
+	m.currentMode = ""
+	m.generation++
+	m.mu.Unlock()
+	return m.procManager.Stop(ctx, xmrigProcessName, 3*time.Second)
+}
+
+func (m *XMRigManager) Shutdown(ctx context.Context) error {
+	if !m.cfg.Enabled {
+		return nil
+	}
 	m.mu.Lock()
 	if !m.stopped {
 		m.stopped = true
 		close(m.stopCh)
 	}
 	m.currentMode = ""
+	m.generation++
 	m.mu.Unlock()
 	return m.procManager.Stop(ctx, xmrigProcessName, 3*time.Second)
 }
@@ -339,3 +355,4 @@ func (m *noopXMRigManager) Start(_ context.Context) error            { return ni
 func (m *noopXMRigManager) SetFullMode(_ context.Context) error      { return nil }
 func (m *noopXMRigManager) SetHeartbeatMode(_ context.Context) error { return nil }
 func (m *noopXMRigManager) Stop(_ context.Context) error             { return nil }
+func (m *noopXMRigManager) Shutdown(_ context.Context) error         { return nil }

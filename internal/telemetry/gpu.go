@@ -10,9 +10,12 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/0xforce/xfo-miner/internal/debuglog"
 )
 
 var execCommandContext = exec.CommandContext
@@ -28,6 +31,7 @@ type GPUDevice struct {
 	DeviceFingerprint string  `json:"device_fingerprint,omitempty"`
 	GPUModel          string  `json:"gpu_model"`
 	VRAMGB            float64 `json:"vram_gb"`
+	VRAMBytes         int64   `json:"vram_bytes,omitempty"`
 	Status            string  `json:"status"`
 	ReputationScore   float64 `json:"reputation_score"`
 	PCIBusID          string  `json:"pci_bus_id"`
@@ -72,11 +76,14 @@ func ScanGPUs() ([]GPUDevice, error) {
 					DeviceFingerprint: buildDeviceFingerprint(identity.VendorID, identity.DeviceID, identity.PCIBusID, identity.GPUUUID, identity.DeviceName),
 					GPUModel:          identity.DeviceName,
 					VRAMGB:            vramBytesToGB(identity.VRAMBytes),
+					VRAMBytes:         identity.VRAMBytes,
 					Status:            "idle",
 					ReputationScore:   50.0,
 					PCIBusID:          identity.PCIBusID,
 				})
 			}
+			devices = normalizeGPUDevices(devices)
+			logGPUDevices("opencl_fallback_devices", devices)
 			return devices, nil
 		}
 		return nil, err
@@ -119,6 +126,7 @@ func ScanGPUs() ([]GPUDevice, error) {
 			DeviceFingerprint: buildDeviceFingerprint(identity.VendorID, identity.DeviceID, strings.TrimSpace(parts[3]), identity.GPUUUID, name),
 			GPUModel:          name,
 			VRAMGB:            memMB / 1024.0,
+			VRAMBytes:         int64(memMB * 1024.0 * 1024.0),
 			Status:            "idle",
 			ReputationScore:   50.0,
 			PCIBusID:          strings.TrimSpace(parts[3]),
@@ -126,8 +134,70 @@ func ScanGPUs() ([]GPUDevice, error) {
 			Utilization:       util,
 		})
 	}
+	devices = normalizeGPUDevices(devices)
+	logGPUDevices("nvidia_smi_devices", devices)
 
 	return devices, nil
+}
+
+func normalizeGPUDevices(devices []GPUDevice) []GPUDevice {
+	if len(devices) <= 1 {
+		return devices
+	}
+	normalized := append([]GPUDevice(nil), devices...)
+	sort.SliceStable(normalized, func(i, j int) bool {
+		return gpuDeviceLess(normalized[i], normalized[j])
+	})
+	return normalized
+}
+
+func gpuDeviceLess(a GPUDevice, b GPUDevice) bool {
+	if hashcatVisibleGPUDevice(a) != hashcatVisibleGPUDevice(b) {
+		return hashcatVisibleGPUDevice(a)
+	}
+	if openCLPreferredGPUDevice(a) != openCLPreferredGPUDevice(b) {
+		return openCLPreferredGPUDevice(a)
+	}
+	if nonVirtualGPUDevice(a) != nonVirtualGPUDevice(b) {
+		return nonVirtualGPUDevice(a)
+	}
+	if a.VRAMBytes != b.VRAMBytes {
+		return a.VRAMBytes > b.VRAMBytes
+	}
+	if a.VRAMGB != b.VRAMGB {
+		return a.VRAMGB > b.VRAMGB
+	}
+	if hasPCIBusGPUDevice(a) != hasPCIBusGPUDevice(b) {
+		return hasPCIBusGPUDevice(a)
+	}
+	return a.DeviceIndex < b.DeviceIndex
+}
+
+func hashcatVisibleGPUDevice(device GPUDevice) bool {
+	model := strings.ToLower(strings.TrimSpace(device.GPUModel))
+	for _, visible := range debuglog.CurrentHashcatVisibleModels() {
+		visibleLower := strings.ToLower(strings.TrimSpace(visible))
+		if visibleLower == "" {
+			continue
+		}
+		if strings.Contains(visibleLower, model) || strings.Contains(model, visibleLower) {
+			return true
+		}
+	}
+	return false
+}
+
+func openCLPreferredGPUDevice(device GPUDevice) bool {
+	return strings.TrimSpace(device.UUIDSource) == "opencl_uuid_khr"
+}
+
+func nonVirtualGPUDevice(device GPUDevice) bool {
+	isVirtual, _ := debuglog.ClassifyVirtualAdapter(device.GPUModel, device.PCIBusID)
+	return !isVirtual
+}
+
+func hasPCIBusGPUDevice(device GPUDevice) bool {
+	return strings.TrimSpace(device.PCIBusID) != ""
 }
 
 func detectGPUIdentities() ([]openCLIdentity, string, error) {
@@ -165,10 +235,14 @@ func detectOpenCLIdentities() ([]openCLIdentity, error) {
 	}
 
 	lines := strings.Split(string(out), "\n")
+	logOpenCLPlatforms(lines)
 	identities := make([]openCLIdentity, 0)
 	current := openCLIdentity{DeviceIndex: -1}
 
 	flush := func() {
+		if strings.TrimSpace(current.GPUUUID) == "" {
+			current.GPUUUID = buildOpenCLCompatibilityUUID(current)
+		}
 		if strings.TrimSpace(current.GPUUUID) == "" {
 			return
 		}
@@ -186,17 +260,25 @@ func detectOpenCLIdentities() ([]openCLIdentity, error) {
 		}
 
 		if strings.Contains(lower, "device #") {
-			if strings.TrimSpace(current.GPUUUID) != "" {
+			if openCLIdentityHasData(current) {
 				flush()
 				current = openCLIdentity{DeviceIndex: -1}
 			}
 			continue
 		}
 		if strings.Contains(lower, "device name") {
+			if openCLIdentityHasData(current) {
+				flush()
+				current = openCLIdentity{DeviceIndex: -1}
+			}
 			current.DeviceName = extractValue(trimmed)
 			continue
 		}
-		if strings.Contains(lower, "device uuid") {
+		if strings.Contains(lower, "board name") && strings.TrimSpace(current.DeviceName) == "" {
+			current.DeviceName = extractValue(trimmed)
+			continue
+		}
+		if isOpenCLUUIDLine(lower) {
 			current.GPUUUID = normalizeHexString(extractValue(trimmed))
 			continue
 		}
@@ -209,7 +291,13 @@ func detectOpenCLIdentities() ([]openCLIdentity, error) {
 			continue
 		}
 		if strings.Contains(lower, "pci bus") {
-			current.PCIBusID = strings.TrimSpace(extractValue(trimmed))
+			current.PCIBusID = parseOpenCLPCIBusID(extractValue(trimmed))
+			continue
+		}
+		if strings.Contains(lower, "topology (amd)") || strings.Contains(lower, "device topology (amd)") || strings.Contains(lower, "device topology") {
+			if busID := parseOpenCLPCIBusID(extractValue(trimmed)); busID != "" {
+				current.PCIBusID = busID
+			}
 			continue
 		}
 		if strings.Contains(lower, "global memory size") {
@@ -228,6 +316,7 @@ func detectOpenCLIdentities() ([]openCLIdentity, error) {
 	for i := range identities {
 		identities[i].DeviceIndex = i
 	}
+	debuglog.LogVerbose("opencl_identity_devices", "devices", identities)
 
 	return identities, nil
 }
@@ -236,7 +325,7 @@ func detectWindowsPNPIdentities() ([]openCLIdentity, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	cmd := execCommandContext(ctx, "powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_VideoController | Select-Object PNPDeviceID,AdapterCompatibility,Name | ConvertTo-Csv -NoTypeInformation")
+	cmd := execCommandContext(ctx, "powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_VideoController | Select-Object PNPDeviceID,AdapterCompatibility,Name,AdapterRAM | ConvertTo-Csv -NoTypeInformation")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("windows_pnp_probe_failed: %w", err)
@@ -258,6 +347,7 @@ func detectWindowsPNPIdentities() ([]openCLIdentity, error) {
 	idxPNP, okPNP := headers["pnpdeviceid"]
 	idxVendor, okVendor := headers["adaptercompatibility"]
 	idxName, okName := headers["name"]
+	idxAdapterRAM, hasAdapterRAM := headers["adapterram"]
 	if !okPNP || !okVendor || !okName {
 		return nil, errors.New("windows_pnp_missing_required_columns")
 	}
@@ -276,6 +366,10 @@ func detectWindowsPNPIdentities() ([]openCLIdentity, error) {
 		if idxVendor < len(row) {
 			vendor = strings.TrimSpace(row[idxVendor])
 		}
+		vramBytes := int64(0)
+		if hasAdapterRAM && idxAdapterRAM < len(row) {
+			vramBytes = parseWindowsAdapterRAMBytes(row[idxAdapterRAM])
+		}
 
 		parsedVendorID, parsedDeviceID := parsePNPIDs(pnp)
 		vendorFallbackID := parseLikelyHexID(vendor, 4)
@@ -286,12 +380,14 @@ func detectWindowsPNPIdentities() ([]openCLIdentity, error) {
 			VendorID:    firstNonEmpty(parsedVendorID, vendorFallbackID),
 			DeviceID:    parsedDeviceID,
 			PCIBusID:    pnp,
+			VRAMBytes:   vramBytes,
 		})
 	}
 
 	if len(identities) == 0 {
 		return nil, errors.New("windows_pnp_no_usable_gpu_identity")
 	}
+	debuglog.LogVerbose("windows_pnp_devices", "devices", identities)
 
 	return identities, nil
 }
@@ -356,8 +452,87 @@ func detectMacPCIIdentities() ([]openCLIdentity, error) {
 	if len(identities) == 0 {
 		return nil, errors.New("mac_system_profiler_no_usable_gpu_identity")
 	}
+	debuglog.LogVerbose("mac_pci_devices", "devices", identities)
 
 	return identities, nil
+}
+
+func logOpenCLPlatforms(lines []string) {
+	if !debuglog.Verbose() {
+		return
+	}
+	type platformSummary struct {
+		PlatformIndex int    `json:"platform_index"`
+		PlatformName  string `json:"platform_name,omitempty"`
+		Vendor        string `json:"vendor,omitempty"`
+		Version       string `json:"version,omitempty"`
+	}
+	platforms := make([]platformSummary, 0)
+	current := platformSummary{PlatformIndex: -1}
+	flush := func() {
+		if current.PlatformIndex < 0 && current.PlatformName == "" && current.Vendor == "" && current.Version == "" {
+			return
+		}
+		platforms = append(platforms, current)
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.Contains(lower, "platform #") {
+			if current.PlatformIndex >= 0 || current.PlatformName != "" || current.Vendor != "" || current.Version != "" {
+				flush()
+				current = platformSummary{PlatformIndex: -1}
+			}
+			if idx := strings.Index(lower, "platform #"); idx >= 0 {
+				num := strings.TrimSpace(lower[idx+len("platform #"):])
+				if parsed, err := strconv.Atoi(strings.Fields(num)[0]); err == nil {
+					current.PlatformIndex = parsed
+				}
+			}
+			continue
+		}
+		if strings.Contains(lower, "platform name") {
+			current.PlatformName = extractValue(trimmed)
+			continue
+		}
+		if strings.Contains(lower, "platform vendor") {
+			current.Vendor = extractValue(trimmed)
+			continue
+		}
+		if strings.Contains(lower, "platform version") {
+			current.Version = extractValue(trimmed)
+			continue
+		}
+	}
+	flush()
+	if len(platforms) > 0 {
+		debuglog.LogVerbose("opencl_platforms", "platforms", platforms)
+	}
+}
+
+func logGPUDevices(event string, devices []GPUDevice) {
+	if !debuglog.Enabled() {
+		return
+	}
+	for _, device := range devices {
+		isVirtual, virtualReason := debuglog.ClassifyVirtualAdapter(device.GPUModel, device.PCIBusID)
+		debuglog.Log("gpu_device_identity",
+			"source_event", event,
+			"gpu_model", device.GPUModel,
+			"gpu_uuid", device.GPUUUID,
+			"uuid_source", device.UUIDSource,
+			"device_fingerprint", device.DeviceFingerprint,
+			"pci_bus_id", device.PCIBusID,
+			"vendor_id", device.VendorID,
+			"device_id", device.DeviceID,
+			"device_index", device.DeviceIndex,
+			"vram_gb", device.VRAMGB,
+			"vram_bytes", device.VRAMBytes,
+			"identity_stable", strings.TrimSpace(device.GPUUUID) != "" || strings.TrimSpace(device.DeviceFingerprint) != "",
+			"is_virtual", isVirtual,
+			"virtual_reason", virtualReason,
+		)
+	}
 }
 
 func extractValue(line string) string {
@@ -383,6 +558,102 @@ func normalizeHexString(value string) string {
 	return string(b)
 }
 
+func isOpenCLUUIDLine(lower string) bool {
+	if strings.Contains(lower, "driver uuid") {
+		return false
+	}
+	return strings.Contains(lower, "device uuid") ||
+		strings.Contains(lower, "cl_device_uuid_khr") ||
+		strings.Contains(lower, "uuid (amd)") ||
+		strings.HasPrefix(strings.TrimSpace(lower), "uuid:") ||
+		strings.HasPrefix(strings.TrimSpace(lower), "uuid ")
+}
+
+func buildOpenCLCompatibilityUUID(identity openCLIdentity) string {
+	if strings.TrimSpace(identity.GPUUUID) != "" {
+		return identity.GPUUUID
+	}
+	if strings.TrimSpace(identity.DeviceName) == "" {
+		return ""
+	}
+	if strings.TrimSpace(identity.PCIBusID) == "" && strings.TrimSpace(identity.VendorID) == "" && strings.TrimSpace(identity.DeviceID) == "" {
+		return ""
+	}
+	return makeCompatibilityGPUUUID("opencl_topology_fingerprint", identity.DeviceName, identity.VendorID, identity.DeviceID, identity.PCIBusID)
+}
+
+func openCLIdentityHasData(identity openCLIdentity) bool {
+	return strings.TrimSpace(identity.DeviceName) != "" ||
+		strings.TrimSpace(identity.GPUUUID) != "" ||
+		strings.TrimSpace(identity.VendorID) != "" ||
+		strings.TrimSpace(identity.DeviceID) != "" ||
+		strings.TrimSpace(identity.PCIBusID) != "" ||
+		identity.VRAMBytes > 0
+}
+
+func parseOpenCLPCIBusID(value string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	if trimmed == "" {
+		return ""
+	}
+	if busID := parseOpenCLTopologyNotation(trimmed); busID != "" {
+		return busID
+	}
+	if idx := strings.LastIndex(trimmed, ","); idx >= 0 {
+		trimmed = strings.TrimSpace(trimmed[idx+1:])
+	}
+	trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "pci-e"))
+	trimmed = strings.Trim(trimmed, " ,")
+	if busID := parseOpenCLTopologyNotation(trimmed); busID != "" {
+		return busID
+	}
+	if len(trimmed) == len("00:00.0") {
+		return "0000:" + trimmed
+	}
+	return trimmed
+}
+
+func parseOpenCLTopologyNotation(value string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	trimmed = strings.ReplaceAll(trimmed, " ", "")
+	trimmed = strings.TrimPrefix(trimmed, "pci[")
+	trimmed = strings.TrimSuffix(trimmed, "]")
+	if !strings.Contains(trimmed, "b#") || !strings.Contains(trimmed, "d#") || !strings.Contains(trimmed, "f#") {
+		return ""
+	}
+	bus := parseDecimalTokenAfterMarker(trimmed, "b#")
+	device := parseDecimalTokenAfterMarker(trimmed, "d#")
+	function := parseDecimalTokenAfterMarker(trimmed, "f#")
+	if bus < 0 || device < 0 || function < 0 {
+		return ""
+	}
+	return fmt.Sprintf("0000:%02x:%02x.%d", bus, device, function)
+}
+
+func parseDecimalTokenAfterMarker(value, marker string) int {
+	idx := strings.Index(value, marker)
+	if idx < 0 {
+		return -1
+	}
+	start := idx + len(marker)
+	end := start
+	for end < len(value) {
+		c := value[end]
+		if c < '0' || c > '9' {
+			break
+		}
+		end++
+	}
+	if end == start {
+		return -1
+	}
+	parsed, err := strconv.Atoi(value[start:end])
+	if err != nil {
+		return -1
+	}
+	return parsed
+}
+
 func parseOpenCLMemoryBytes(value string) int64 {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -402,6 +673,19 @@ func parseOpenCLMemoryBytes(value string) int64 {
 		}
 	}
 	return 0
+}
+
+func parseWindowsAdapterRAMBytes(value string) int64 {
+	trimmed := strings.TrimSpace(strings.Trim(value, `"`))
+	trimmed = strings.ReplaceAll(trimmed, ",", "")
+	if trimmed == "" {
+		return 0
+	}
+	parsed, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	return parsed
 }
 
 func vramBytesToGB(bytes int64) float64 {

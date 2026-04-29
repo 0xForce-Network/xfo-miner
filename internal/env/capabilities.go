@@ -3,6 +3,8 @@ package env
 import (
 	"context"
 	"errors"
+
+	"github.com/0xforce/xfo-miner/internal/debuglog"
 )
 
 const (
@@ -25,12 +27,19 @@ type SystemCapabilities struct {
 	RunMode        string
 }
 
+var detectGPUFn = DetectGPU
+var detectHashcatFn = DetectHashcat
+var detectXMRigFn = DetectXMRig
+var detectDockerFn = DetectDocker
+var runHashcatBenchmarkFn = RunHashcatBenchmark
+var detectNvidiaDockerFn = DetectNvidiaDocker
+
 func ProbeAll(ctx context.Context, hashcatPath string, xmrigPath string) (*SystemCapabilities, error) {
 	caps := &SystemCapabilities{RunMode: RunModeCPUOnly}
 	warnings := make([]error, 0)
 	caps.IsRoot = CheckRoot()
 
-	gpus, gpuErr := DetectGPU(ctx)
+	gpus, gpuErr := detectGPUFn(ctx)
 	if gpuErr != nil {
 		warnings = append(warnings, gpuErr)
 	}
@@ -39,16 +48,21 @@ func ProbeAll(ctx context.Context, hashcatPath string, xmrigPath string) (*Syste
 		caps.GPUs = gpus
 	}
 
-	hashcatInfo, hashcatErr := DetectHashcat(ctx, hashcatPath)
+	hashcatInfo, hashcatErr := detectHashcatFn(ctx, hashcatPath)
 	if hashcatErr != nil {
 		warnings = append(warnings, hashcatErr)
 	}
 	if hashcatInfo != nil {
 		caps.HasHashcat = hashcatInfo.Available
 		caps.HashcatVersion = hashcatInfo.Version
+		debuglog.Log("hashcat_probe_summary",
+			"hashcat_path", hashcatPath,
+			"available", hashcatInfo.Available,
+			"version", hashcatInfo.Version,
+		)
 	}
 
-	xmrigInfo, xmrigErr := DetectXMRig(ctx, xmrigPath)
+	xmrigInfo, xmrigErr := detectXMRigFn(ctx, xmrigPath)
 	if xmrigErr != nil {
 		warnings = append(warnings, xmrigErr)
 	}
@@ -57,7 +71,7 @@ func ProbeAll(ctx context.Context, hashcatPath string, xmrigPath string) (*Syste
 		caps.XMRigVersion = xmrigInfo.Version
 	}
 
-	dockerInfo, dockerErr := DetectDocker(ctx)
+	dockerInfo, dockerErr := detectDockerFn(ctx)
 	if dockerErr != nil {
 		warnings = append(warnings, dockerErr)
 	}
@@ -66,16 +80,25 @@ func ProbeAll(ctx context.Context, hashcatPath string, xmrigPath string) (*Syste
 	}
 
 	if caps.HasGPU && caps.HasHashcat {
-		benchmark, benchErr := RunHashcatBenchmark(ctx, hashcatPath)
+		benchmark, benchErr := runHashcatBenchmarkFn(ctx, hashcatPath)
 		if benchErr != nil {
 			warnings = append(warnings, benchErr)
+			debuglog.Log("hashcat_benchmark_failed", "hashcat_path", hashcatPath, "error", benchErr)
 		} else {
 			caps.BenchmarkKHs = benchmark.SpeedKHs
+			if benchmark.GPUName != "" {
+				debuglog.SetHashcatVisibleModels([]string{benchmark.GPUName})
+			}
+			debuglog.Log("hashcat_benchmark_summary",
+				"hashcat_path", hashcatPath,
+				"gpu_name", benchmark.GPUName,
+				"speed_khs", benchmark.SpeedKHs,
+			)
 		}
 	}
 
 	if caps.HasGPU && caps.HasDocker {
-		caps.AIReady = DetectNvidiaDocker(ctx)
+		caps.AIReady = detectNvidiaDockerFn(ctx)
 	}
 
 	switch {
@@ -86,6 +109,18 @@ func ProbeAll(ctx context.Context, hashcatPath string, xmrigPath string) (*Syste
 	default:
 		caps.RunMode = RunModeCPUOnly
 	}
+	debuglog.Log("system_capabilities_summary",
+		"has_gpu", caps.HasGPU,
+		"gpu_count", len(caps.GPUs),
+		"has_hashcat", caps.HasHashcat,
+		"hashcat_version", caps.HashcatVersion,
+		"has_xmrig", caps.HasXMRig,
+		"xmrig_version", caps.XMRigVersion,
+		"has_docker", caps.HasDocker,
+		"ai_ready", caps.AIReady,
+		"benchmark_khs", caps.BenchmarkKHs,
+		"run_mode", caps.RunMode,
+	)
 
 	return caps, errors.Join(warnings...)
 }
