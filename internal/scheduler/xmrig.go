@@ -3,10 +3,14 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,9 +21,11 @@ import (
 )
 
 const (
-	xmrigModeFull      = "full"
-	xmrigModeHeartbeat = "heartbeat"
-	xmrigProcessName   = "xmrig_l1"
+	xmrigModeFull        = "full"
+	xmrigModeHeartbeat   = "heartbeat"
+	xmrigProcessName     = "xmrig_l1"
+	xmrigLogRetention    = 72 * time.Hour
+	xmrigActiveLogMaxAge = 24 * time.Hour
 )
 
 type xmrigController interface {
@@ -191,6 +197,9 @@ func (m *XMRigManager) restartWithModeLocked(ctx context.Context, mode string, t
 	if err := m.cfg.ValidateExtraArgs(); err != nil {
 		return fmt.Errorf("validate xmrig extra args: %w", err)
 	}
+	if err := prepareXMRigLogPath(m.cfg.XMRigLogPath, time.Now()); err != nil {
+		m.logger.Warn("xmrig log preparation warning", "path", m.cfg.XMRigLogPath, "error", err)
+	}
 
 	args := []string{
 		"--http-port", strconv.Itoa(m.httpPort),
@@ -203,9 +212,9 @@ func (m *XMRigManager) restartWithModeLocked(ctx context.Context, mode string, t
 		"--user-agent", fmt.Sprintf("XMRig/6.19.3 (xfo-miner) threads:%d", threads),
 	}
 	args = append(args, m.cfg.ExtraArgs...)
-	m.logger.Info("xmrig starting", "path", m.cfg.XMRigPath, "args", args)
+	m.logger.Info("xmrig starting", "path", m.cfg.XMRigPath, "args", args, "log_path", m.cfg.XMRigLogPath)
 
-	proc, err := m.procManager.Start(ctx, xmrigProcessName, m.cfg.XMRigPath, args)
+	proc, err := m.procManager.StartRaw(ctx, xmrigProcessName, m.cfg.XMRigPath, args)
 	if err != nil {
 		m.logger.Error(
 			"xmrig start FAILED",
@@ -216,6 +225,10 @@ func (m *XMRigManager) restartWithModeLocked(ctx context.Context, mode string, t
 		)
 		return fmt.Errorf("start xmrig (%s): %w", mode, err)
 	}
+	if err := m.pipeProcessOutputToLog(proc, m.cfg.XMRigLogPath); err != nil {
+		_ = m.procManager.Stop(ctx, xmrigProcessName, 3*time.Second)
+		return fmt.Errorf("open xmrig log: %w", err)
+	}
 
 	m.generation++
 	gen := m.generation
@@ -224,6 +237,227 @@ func (m *XMRigManager) restartWithModeLocked(ctx context.Context, mode string, t
 	m.currentMode = mode
 	m.logger.Info("xmrig mode applied", "mode", mode, "threads", threads, "generation", gen)
 	return nil
+}
+
+func (m *XMRigManager) pipeProcessOutputToLog(proc *process.ManagedProcess, logPath string) error {
+	logPath = strings.TrimSpace(logPath)
+	if proc == nil || logPath == "" {
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return fmt.Errorf("create parent directory %q: %w", filepath.Dir(logPath), err)
+	}
+	sink, err := newXMRigLogSink(logPath, time.Now)
+	if err != nil {
+		return err
+	}
+
+	m.logger.Info("xmrig output redirected", "log_path", logPath)
+	go func() {
+		defer sink.close()
+		var wg sync.WaitGroup
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := process.ScanLines(proc.Stdout, func(line string) {
+				if err := sink.writeLine("[stdout]", line); err != nil {
+					m.logger.Warn("failed writing xmrig stdout log", "error", err)
+				}
+			}); err != nil && err != io.ErrClosedPipe {
+				m.logger.Warn("failed reading xmrig stdout", "error", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if err := process.ScanLines(proc.Stderr, func(line string) {
+				if err := sink.writeLine("[stderr]", line); err != nil {
+					m.logger.Warn("failed writing xmrig stderr log", "error", err)
+				}
+			}); err != nil && err != io.ErrClosedPipe {
+				m.logger.Warn("failed reading xmrig stderr", "error", err)
+			}
+		}()
+		wg.Wait()
+	}()
+
+	return nil
+}
+
+type xmrigLogSink struct {
+	path     string
+	now      func() time.Time
+	mu       sync.Mutex
+	file     *os.File
+	openedAt time.Time
+}
+
+func newXMRigLogSink(logPath string, now func() time.Time) (*xmrigLogSink, error) {
+	if now == nil {
+		now = time.Now
+	}
+	if err := prepareXMRigLogPath(logPath, now()); err != nil {
+		return nil, err
+	}
+	s := &xmrigLogSink{path: filepath.Clean(logPath), now: now}
+	if err := s.openLocked(now()); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *xmrigLogSink) openLocked(now time.Time) error {
+	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open %q: %w", s.path, err)
+	}
+	s.file = f
+	s.openedAt = now
+	return nil
+}
+
+func (s *xmrigLogSink) writeLine(prefix string, line string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now()
+	if !s.openedAt.IsZero() && now.Sub(s.openedAt) >= xmrigActiveLogMaxAge {
+		if err := s.rotateLocked(now); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintf(s.file, "%s %s\n", prefix, line)
+	return err
+}
+
+func (s *xmrigLogSink) rotateLocked(now time.Time) error {
+	if s.file != nil {
+		if err := s.file.Close(); err != nil {
+			return fmt.Errorf("close active xmrig log before rotation: %w", err)
+		}
+		s.file = nil
+	}
+	if err := rotateActiveXMRigLog(s.path, now); err != nil {
+		return err
+	}
+	if err := cleanupXMRigLogFamily(s.path, now, xmrigLogRetention); err != nil {
+		return err
+	}
+	return s.openLocked(now)
+}
+
+func (s *xmrigLogSink) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file != nil {
+		_ = s.file.Close()
+		s.file = nil
+	}
+}
+
+func prepareXMRigLogPath(logPath string, now time.Time) error {
+	logPath = strings.TrimSpace(logPath)
+	if logPath == "" {
+		return nil
+	}
+	cleanPath := filepath.Clean(logPath)
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o755); err != nil {
+		return fmt.Errorf("create parent directory %q: %w", filepath.Dir(cleanPath), err)
+	}
+	if err := rotateActiveXMRigLogIfStale(cleanPath, now, xmrigActiveLogMaxAge); err != nil {
+		return err
+	}
+	return cleanupXMRigLogFamily(cleanPath, now, xmrigLogRetention)
+}
+
+func rotateActiveXMRigLogIfStale(logPath string, now time.Time, maxAge time.Duration) error {
+	if maxAge <= 0 {
+		return nil
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat active xmrig log %q: %w", logPath, err)
+	}
+	if info.IsDir() || now.Sub(info.ModTime()) < maxAge {
+		return nil
+	}
+	return rotateActiveXMRigLog(logPath, now)
+}
+
+func rotateActiveXMRigLog(logPath string, now time.Time) error {
+	if _, err := os.Stat(logPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat active xmrig log %q: %w", logPath, err)
+	}
+	rotatedPath := xmrigRotatedLogPath(logPath, now)
+	if err := os.Rename(logPath, rotatedPath); err != nil {
+		return fmt.Errorf("rotate active xmrig log %q to %q: %w", logPath, rotatedPath, err)
+	}
+	return nil
+}
+
+func xmrigRotatedLogPath(logPath string, now time.Time) string {
+	return filepath.Join(filepath.Dir(logPath), filepath.Base(logPath)+".xfo-"+strconv.FormatInt(now.UTC().UnixNano(), 10)+".log")
+}
+
+func cleanupXMRigLogFamily(logPath string, now time.Time, retention time.Duration) error {
+	logPath = strings.TrimSpace(logPath)
+	if logPath == "" || retention <= 0 {
+		return nil
+	}
+
+	cleanPath := filepath.Clean(logPath)
+	logDir := filepath.Dir(cleanPath)
+	base := filepath.Base(cleanPath)
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return os.MkdirAll(logDir, 0o755)
+		}
+		return fmt.Errorf("read log directory %q: %w", logDir, err)
+	}
+
+	var cleanupErrs []error
+	cutoff := now.Add(-retention)
+	for _, entry := range entries {
+		if entry.IsDir() || !isXMRigRotatedLogName(entry.Name(), base) {
+			continue
+		}
+		candidate := filepath.Join(logDir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("stat log %q: %w", candidate, err))
+			continue
+		}
+		if !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(candidate); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove old log %q: %w", candidate, err))
+		}
+	}
+
+	return errors.Join(cleanupErrs...)
+}
+
+func isXMRigRotatedLogName(name string, base string) bool {
+	prefix := base + ".xfo-"
+	suffix := ".log"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		return false
+	}
+	stamp := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+	if stamp == "" {
+		return false
+	}
+	_, err := strconv.ParseInt(stamp, 10, 64)
+	return err == nil
 }
 
 func (m *XMRigManager) watchProcessExit(done <-chan struct{}, startGen uint64) {

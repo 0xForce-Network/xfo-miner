@@ -58,6 +58,7 @@ Descripción de campos:
 - `cpu_mining`: Configuración de minería CPU con XMRig
   - `enabled`: Activa la minería de fondo con XMRig
   - `xmrig_path`: Ruta al binario de xmrig
+  - `xmrig_log_path`: Ruta local para stdout/stderr de XMRig. Vacío usa `./logs/xmrig.log` relativo a `config.json`; las rutas relativas también se resuelven desde el directorio de configuración. El directorio padre se crea automáticamente y solo la familia de logs XMRig configurada se limpia con retención de 3 días.
   - `stratum_url`: URL stratum usada por xmrig
   - `max_threads`: Hilos de XMRig en modo de minería completa
   - `background_threads`: Hilos de XMRig en modo heartbeat/standby

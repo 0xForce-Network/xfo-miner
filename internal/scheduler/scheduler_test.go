@@ -111,7 +111,7 @@ func (m *mockProcessManager) StopAll(_ context.Context, _ time.Duration) error {
 	m.stopAll++
 	return m.stopErr
 }
-func (m *mockProcessManager) Get(_ string) (*process.ManagedProcess, bool)     { return nil, false }
+func (m *mockProcessManager) Get(_ string) (*process.ManagedProcess, bool) { return nil, false }
 func (m *mockProcessManager) IsRunning(name string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -136,17 +136,18 @@ func (m *mockProcessManager) stopAllCount() int {
 }
 
 type mockPoolClient struct {
-	mu           sync.Mutex
-	handler      func(string, json.RawMessage)
-	reconnect    func()
-	connected    bool
-	lastLogin    *pool.LoginMessage
-	results      []pool.ResultMessage
-	probeResults []pool.ProbeResultMessage
-	connectErr   error
-	loginErr     error
-	connects     int
-	logins       int
+	mu                  sync.Mutex
+	handler             func(string, json.RawMessage)
+	reconnect           func()
+	connected           bool
+	lastLogin           *pool.LoginMessage
+	results             []pool.ResultMessage
+	probeResults        []pool.ProbeResultMessage
+	hashcatProbeResults []pool.HashcatCapabilityProbeResultMessage
+	connectErr          error
+	loginErr            error
+	connects            int
+	logins              int
 }
 
 func (m *mockPoolClient) Connect(_ context.Context, _ string) error {
@@ -190,6 +191,14 @@ func (m *mockPoolClient) SendProbeResult(result *pool.ProbeResultMessage) error 
 	defer m.mu.Unlock()
 	if result != nil {
 		m.probeResults = append(m.probeResults, *result)
+	}
+	return nil
+}
+func (m *mockPoolClient) SendHashcatCapabilityProbeResult(result *pool.HashcatCapabilityProbeResultMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if result != nil {
+		m.hashcatProbeResults = append(m.hashcatProbeResults, *result)
 	}
 	return nil
 }
@@ -271,6 +280,16 @@ func (m *mockPoolClient) latestProbeResult() *pool.ProbeResultMessage {
 	return &copy
 }
 
+func (m *mockPoolClient) latestHashcatProbeResult() *pool.HashcatCapabilityProbeResultMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.hashcatProbeResults) == 0 {
+		return nil
+	}
+	copy := m.hashcatProbeResults[len(m.hashcatProbeResults)-1]
+	return &copy
+}
+
 type mockForensicSandbox struct {
 	handle func(ctx context.Context, payload []byte, challengeID string) (*forensic.ProbeExecutionResult, error)
 }
@@ -294,6 +313,10 @@ func (m *mockHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage, onPr
 	return nil
 }
 
+func (m *mockHashcatRunner) Probe(_ context.Context, probe *pool.HashcatCapabilityProbeMessage) (*HashcatProbeResult, error) {
+	return &HashcatProbeResult{Status: "supported", ReasonCode: "ok", Version: "hashcat-test"}, nil
+}
+
 type statusHashcatRunner struct {
 	status string
 	data   string
@@ -307,6 +330,10 @@ func (m *statusHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage, on
 		onResult(&pool.ResultMessage{Type: "result", JobID: job.JobID, Status: m.status, Data: m.data})
 	}
 	return nil
+}
+
+func (m *statusHashcatRunner) Probe(_ context.Context, _ *pool.HashcatCapabilityProbeMessage) (*HashcatProbeResult, error) {
+	return &HashcatProbeResult{Status: "supported", ReasonCode: "ok"}, nil
 }
 
 type capturingHashcatRunner struct {
@@ -324,6 +351,10 @@ func (m *failingHashcatRunner) Run(_ context.Context, _ *pool.JobGPUMessage, _ f
 	return m.err
 }
 
+func (m *failingHashcatRunner) Probe(_ context.Context, _ *pool.HashcatCapabilityProbeMessage) (*HashcatProbeResult, error) {
+	return nil, m.err
+}
+
 func (m *capturingHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage, _ func(*pool.ProgressMessage), _ func(*pool.ResultMessage)) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -335,6 +366,10 @@ func (m *capturingHashcatRunner) Run(_ context.Context, job *pool.JobGPUMessage,
 		}
 	}
 	return nil
+}
+
+func (m *capturingHashcatRunner) Probe(_ context.Context, _ *pool.HashcatCapabilityProbeMessage) (*HashcatProbeResult, error) {
+	return &HashcatProbeResult{Status: "supported", ReasonCode: "ok"}, nil
 }
 
 func (m *capturingHashcatRunner) RunCount() int {

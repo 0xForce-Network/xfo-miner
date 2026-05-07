@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -547,6 +550,148 @@ func TestXMRigManagerRejectsReservedExtraArgs(t *testing.T) {
 	if err := mgr.Start(context.Background()); err == nil {
 		t.Fatalf("expected Start() to reject reserved extra args")
 	}
+}
+
+func TestXMRigLogCleanupRemovesOnlyOldLogFamilyMembers(t *testing.T) {
+	t.Parallel()
+
+	logDir := t.TempDir()
+	logPath := filepath.Join(logDir, "xmrig.log")
+	now := time.Now()
+	files := map[string]time.Time{
+		"xmrig.log":                         now,
+		"xmrig.log.xfo-100000000000000.log": now.Add(-96 * time.Hour),
+		"xmrig.log.xfo-200000000000000.log": now.Add(-24 * time.Hour),
+		"xmrig.config":                      now.Add(-96 * time.Hour),
+		"xmrig.notes":                       now.Add(-96 * time.Hour),
+		"xmrig-20260101.log":                now.Add(-96 * time.Hour),
+		"xmrig.1":                           now.Add(-96 * time.Hour),
+		"other-20260101.log":                now.Add(-96 * time.Hour),
+	}
+	for name, modTime := range files {
+		path := filepath.Join(logDir, name)
+		if err := os.WriteFile(path, []byte(name), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatalf("chtimes %s: %v", name, err)
+		}
+	}
+
+	if err := cleanupXMRigLogFamily(logPath, now, 72*time.Hour); err != nil {
+		t.Fatalf("cleanupXMRigLogFamily() error = %v", err)
+	}
+
+	for _, removed := range []string{"xmrig.log.xfo-100000000000000.log"} {
+		if _, err := os.Stat(filepath.Join(logDir, removed)); !os.IsNotExist(err) {
+			t.Fatalf("expected %s removed, stat err=%v", removed, err)
+		}
+	}
+	for _, kept := range []string{"xmrig.log", "xmrig.log.xfo-200000000000000.log", "xmrig.config", "xmrig.notes", "xmrig-20260101.log", "xmrig.1", "other-20260101.log"} {
+		if _, err := os.Stat(filepath.Join(logDir, kept)); err != nil {
+			t.Fatalf("expected %s kept: %v", kept, err)
+		}
+	}
+}
+
+func TestXMRigPrepareLogPathRotatesStaleActiveLog(t *testing.T) {
+	t.Parallel()
+
+	logDir := t.TempDir()
+	logPath := filepath.Join(logDir, "xmrig.log")
+	oldTime := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	now := oldTime.Add(49 * time.Hour)
+	if err := os.WriteFile(logPath, []byte("old active content"), 0o600); err != nil {
+		t.Fatalf("write active log: %v", err)
+	}
+	if err := os.Chtimes(logPath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes active log: %v", err)
+	}
+
+	if err := prepareXMRigLogPath(logPath, now); err != nil {
+		t.Fatalf("prepareXMRigLogPath() error = %v", err)
+	}
+
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("expected stale active log moved away, stat err=%v", err)
+	}
+	rotatedPath := xmrigRotatedLogPath(logPath, now)
+	content, err := os.ReadFile(rotatedPath)
+	if err != nil {
+		t.Fatalf("read rotated active log: %v", err)
+	}
+	if string(content) != "old active content" {
+		t.Fatalf("unexpected rotated content: %q", string(content))
+	}
+}
+
+func TestXMRigLogSinkRollsActiveLogDuringLongRun(t *testing.T) {
+	t.Parallel()
+
+	logPath := filepath.Join(t.TempDir(), "xmrig.log")
+	now := time.Date(2026, 5, 7, 0, 0, 0, 0, time.UTC)
+	sink, err := newXMRigLogSink(logPath, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("newXMRigLogSink() error = %v", err)
+	}
+	defer sink.close()
+
+	if err := sink.writeLine("[stdout]", "day-one"); err != nil {
+		t.Fatalf("write first line: %v", err)
+	}
+	now = now.Add(xmrigActiveLogMaxAge + time.Second)
+	if err := sink.writeLine("[stdout]", "day-two"); err != nil {
+		t.Fatalf("write second line after age rollover: %v", err)
+	}
+
+	rotatedPath := xmrigRotatedLogPath(logPath, now)
+	rotated, err := os.ReadFile(rotatedPath)
+	if err != nil {
+		t.Fatalf("read rotated log: %v", err)
+	}
+	if !strings.Contains(string(rotated), "day-one") || strings.Contains(string(rotated), "day-two") {
+		t.Fatalf("unexpected rotated log content: %q", string(rotated))
+	}
+	active, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read active log: %v", err)
+	}
+	if !strings.Contains(string(active), "day-two") || strings.Contains(string(active), "day-one") {
+		t.Fatalf("unexpected active log content: %q", string(active))
+	}
+}
+
+func TestXMRigManagerRedirectsOutputToConfiguredLogFile(t *testing.T) {
+	t.Parallel()
+
+	logPath := filepath.Join(t.TempDir(), "nested", "xmrig.log")
+	fakeXMRigPath := filepath.Join(t.TempDir(), "fake-xmrig.sh")
+	if err := os.WriteFile(fakeXMRigPath, []byte("#!/bin/sh\necho xmrig-stdout\necho xmrig-stderr >&2\n"), 0o700); err != nil {
+		t.Fatalf("write fake xmrig: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewXMRigManager(process.NewRealManager(logger), &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         fakeXMRigPath,
+		XMRigLogPath:      logPath,
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+	}, "stratum+tcp://pool.example.com:3333", testWalletAddress, "XFo2A88ABC", "Rig-4090-Alpha", logger)
+	mgr.watchdogInitialBackoff = time.Hour
+	mgr.watchdogMaxBackoff = time.Hour
+
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	waitFor(t, func() bool {
+		content, err := os.ReadFile(logPath)
+		if err != nil {
+			return false
+		}
+		text := string(content)
+		return strings.Contains(text, "[stdout] xmrig-stdout") && strings.Contains(text, "[stderr] xmrig-stderr")
+	})
 }
 
 func TestXMRigManagerStopAllowsSubsequentRestart(t *testing.T) {

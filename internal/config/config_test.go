@@ -123,6 +123,131 @@ func TestLoadConfigCPUMiningDefaults(t *testing.T) {
 	if cfg.CPUMining.MaxThreads != maxCPUThreads {
 		t.Fatalf("unexpected max threads: got %d want %d", cfg.CPUMining.MaxThreads, maxCPUThreads)
 	}
+	wantLogPath := filepath.Join(tempDir, "logs", "xmrig.log")
+	if cfg.CPUMining.XMRigLogPath != wantLogPath {
+		t.Fatalf("unexpected xmrig log path: got %q want %q", cfg.CPUMining.XMRigLogPath, wantLogPath)
+	}
+}
+
+func TestLoadConfigCPUMiningXMRigLogPathRelativeToConfigDir(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	configDir := filepath.Join(tempDir, "conf")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	path := filepath.Join(configDir, "config.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
+	  "worker_name": "worker-1",
+	  "pool_url": "wss://pool.example.com/ws",
+	  "max_cpu_threads": 4,
+	  "cpu_mining": {
+	    "enabled": true,
+	    "xmrig_path": "./bin/xmrig",
+	    "xmrig_log_path": "./runtime/xmrig.log",
+	    "stratum_url": "stratum+tcp://pool.example.com:3333",
+	    "max_threads": 4,
+	    "background_threads": 1
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	want := filepath.Join(configDir, "runtime", "xmrig.log")
+	if cfg.CPUMining.XMRigLogPath != want {
+		t.Fatalf("unexpected xmrig log path: got %q want %q", cfg.CPUMining.XMRigLogPath, want)
+	}
+}
+
+func TestLoadConfigCPUMiningXMRigLogPathAbsolutePreserved(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	absLogPath := filepath.Join(tempDir, "custom", "xmrig.log")
+	path := filepath.Join(tempDir, "config.json")
+	content := fmt.Sprintf(`{
+	  "node_id": "node-1",
+	  "wallet_address": "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
+	  "worker_name": "worker-1",
+	  "pool_url": "wss://pool.example.com/ws",
+	  "max_cpu_threads": 4,
+	  "cpu_mining": {
+	    "enabled": true,
+	    "xmrig_path": "./bin/xmrig",
+	    "xmrig_log_path": %q,
+	    "stratum_url": "stratum+tcp://pool.example.com:3333",
+	    "max_threads": 4,
+	    "background_threads": 1
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`, absLogPath)
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.CPUMining.XMRigLogPath != absLogPath {
+		t.Fatalf("expected absolute xmrig log path preserved, got %q want %q", cfg.CPUMining.XMRigLogPath, absLogPath)
+	}
+}
+
+func TestLoadConfigCPUMiningDisabledDoesNotDefaultXMRigLogPath(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "config.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "",
+	  "worker_name": "worker-1",
+	  "pool_url": "",
+	  "max_cpu_threads": 2,
+	  "cpu_mining": {
+	    "enabled": false
+	  },
+	  "idle_behavior": {
+	    "enabled": false,
+	    "grace_period_sec": 0,
+	    "command": "",
+	    "args": ""
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.CPUMining.XMRigLogPath != "" {
+		t.Fatalf("expected disabled CPU mining to leave xmrig log path empty, got %q", cfg.CPUMining.XMRigLogPath)
+	}
 }
 
 func TestLoadConfigCPUMiningValidationBackgroundMinimum(t *testing.T) {

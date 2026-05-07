@@ -58,6 +58,7 @@ Field descriptions:
 - `cpu_mining`: XMRig CPU mining configuration
   - `enabled`: Whether to enable XMRig background mining
   - `xmrig_path`: Path to the xmrig binary
+  - `xmrig_log_path`: Local XMRig stdout/stderr log path. Empty defaults to `./logs/xmrig.log` relative to `config.json`; relative paths also resolve from the config directory. The parent directory is created automatically, and only the configured XMRig log family is cleaned with 3-day retention.
   - `stratum_url`: Stratum pool URL for xmrig
   - `max_threads`: XMRig threads in full mining mode
   - `background_threads`: XMRig threads in heartbeat/standby mode

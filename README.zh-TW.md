@@ -58,6 +58,7 @@ make release      # clean + checksums（完整發佈流程）
 - `cpu_mining`：XMRig CPU 挖礦設定
   - `enabled`：是否啟用 XMRig 背景挖礦
   - `xmrig_path`：xmrig 執行檔路徑
+  - `xmrig_log_path`：XMRig stdout/stderr 本機日誌路徑。空值預設為相對於 `config.json` 的 `./logs/xmrig.log`；相對路徑同樣從設定檔目錄解析。父目錄會自動建立，並且只對設定的 XMRig 日誌家族執行 3 天保留清理。
   - `stratum_url`：xmrig 使用的 stratum 礦池 URL
   - `max_threads`：完整挖礦模式下的 XMRig 執行緒數
   - `background_threads`：heartbeat/standby 模式下的 XMRig 執行緒數

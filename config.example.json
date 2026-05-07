@@ -8,6 +8,7 @@
   "cpu_mining": {
     "enabled": true,
     "xmrig_path": "./bin/xmrig",
+    "xmrig_log_path": "./logs/xmrig.log",
     "stratum_url": "stratum+tcp://<POOL_HOST>:3333",
     "max_threads": 12,
     "background_threads": 1,

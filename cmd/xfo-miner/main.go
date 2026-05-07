@@ -211,6 +211,7 @@ CONFIG FILE PARAMETERS (config.json):
   cpu_mining:
     enabled              (bool)    Enable CPU mining via xmrig (default: false)
     xmrig_path           (string)  Path to xmrig binary (required when enabled)
+    xmrig_log_path       (string)  Local xmrig stdout/stderr log path (default: ./logs/xmrig.log relative to config; 3-day retention)
     stratum_url          (string)  Stratum pool URL, e.g. stratum+tcp://host:3333 (required when enabled)
     max_threads          (int)     XMRig threads in full mining mode (default: max_cpu_threads)
     background_threads   (int)     XMRig threads in standby/heartbeat mode (default: 1)

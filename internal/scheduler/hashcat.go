@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,13 @@ import (
 	"github.com/0xforce/xfo-miner/internal/pool"
 	"github.com/0xforce/xfo-miner/internal/process"
 )
+
+type HashcatProbeResult struct {
+	Status       string
+	ReasonCode   string
+	ErrorSummary string
+	Version      string
+}
 
 var (
 	progressRegex = regexp.MustCompile(`Progress:(\d+)/(\d+)\s+\(([0-9.]+)%\)`)
@@ -125,12 +133,14 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 
 	var stderrWg sync.WaitGroup
 	stderrLineCount := 0
+	stderrEvidence := newBoundedLineBuffer(maxHashcatEvidenceBytes)
 	if proc.Stderr != nil {
 		stderrWg.Add(1)
 		go func() {
 			defer stderrWg.Done()
 			scanErr := process.ScanLines(proc.Stderr, func(line string) {
 				stderrLineCount++
+				stderrEvidence.Add(line)
 			})
 			r.logger.Info("[hashcat] stderr drain finished",
 				"job_id", job.JobID,
@@ -145,11 +155,13 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 	cracked := false
 	plaintext := ""
 	stdoutLineCount := 0
+	stdoutEvidence := newBoundedLineBuffer(maxHashcatEvidenceBytes)
 
 	if proc.Stdout != nil {
 		r.logger.Info("[hashcat] starting stdout scan", "job_id", job.JobID)
 		stdoutScanErr := process.ScanLines(proc.Stdout, func(line string) {
 			stdoutLineCount++
+			stdoutEvidence.Add(line)
 			if msg, ok := parseProgressLine(line, job.JobID); ok && onProgress != nil {
 				onProgress(msg)
 			}
@@ -233,6 +245,18 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 		if cracked {
 			result.Status = "cracked"
 			result.Data = plaintext
+		} else if reasonCode, ok := classifyHashcatUnsupported(stdoutEvidence.String() + "\n" + stderrEvidence.String()); ok {
+			result.Status = "hashcat_unsupported"
+			payload := pool.HashcatUnsupportedData{
+				CapabilityFingerprint: strings.TrimSpace(job.CapabilityFingerprint),
+				ReasonCode:            reasonCode,
+				ErrorSummary:          sanitizeHashcatEvidenceSummary(stdoutEvidence.String() + "\n" + stderrEvidence.String()),
+			}
+			if data, marshalErr := json.Marshal(payload); marshalErr == nil {
+				result.Data = string(data)
+			} else {
+				result.Data = reasonCode
+			}
 		}
 		r.logger.Info("[hashcat] calling onResult", "job_id", job.JobID, "status", result.Status, "data", result.Data)
 		onResult(result)
@@ -240,6 +264,166 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 	}
 
 	return nil
+}
+
+func (r *HashcatRunner) Probe(ctx context.Context, probe *pool.HashcatCapabilityProbeMessage) (*HashcatProbeResult, error) {
+	if probe == nil {
+		return nil, fmt.Errorf("hashcat capability probe is nil")
+	}
+	probeID := strings.TrimSpace(probe.ProbeID)
+	if probeID == "" {
+		return nil, fmt.Errorf("missing probe_id")
+	}
+	timeout := time.Duration(probe.TimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	if timeout > 30*time.Second {
+		timeout = 30 * time.Second
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	targetFile, err := os.CreateTemp("", fmt.Sprintf("xfo_hashcat_probe_%s_*.hash", keyspaceJobIDSanitizer.ReplaceAllString(probeID, "_")))
+	if err != nil {
+		return &HashcatProbeResult{Status: "error", ReasonCode: "probe_tempfile_failed", ErrorSummary: sanitizeHashcatEvidenceSummary(err.Error()), Version: r.hashcatVersion()}, nil
+	}
+	targetPath := targetFile.Name()
+	if _, err := targetFile.WriteString(strings.TrimSpace(probe.ProbePayload.TargetSample) + "\n"); err != nil {
+		_ = targetFile.Close()
+		_ = os.Remove(targetPath)
+		return &HashcatProbeResult{Status: "error", ReasonCode: "probe_tempfile_failed", ErrorSummary: sanitizeHashcatEvidenceSummary(err.Error()), Version: r.hashcatVersion()}, nil
+	}
+	if err := targetFile.Close(); err != nil {
+		_ = os.Remove(targetPath)
+		return &HashcatProbeResult{Status: "error", ReasonCode: "probe_tempfile_failed", ErrorSummary: sanitizeHashcatEvidenceSummary(err.Error()), Version: r.hashcatVersion()}, nil
+	}
+	defer func() {
+		_ = os.Remove(targetPath)
+	}()
+
+	job := &pool.JobGPUMessage{
+		Type:                  "job_gpu",
+		JobID:                 "probe_" + probeID,
+		CapabilityFingerprint: strings.TrimSpace(probe.CapabilityFingerprint),
+		HashMode:              probe.JobShape.HashMode,
+		Target:                targetPath,
+		Dictionary:            probe.JobShape.Dictionary,
+		KeyspaceContract:      probe.JobShape.KeyspaceContract,
+		Skip:                  0,
+		Limit:                 1,
+	}
+	if probe.JobShape.AttackMode != nil && len(job.KeyspaceContract) == 0 {
+		job.KeyspaceContract = json.RawMessage(fmt.Sprintf(`{"type":"probe_args","attack_mode":%d}`, *probe.JobShape.AttackMode))
+	}
+
+	keyspace, err := materializeProbeKeyspaceContract(job, probe)
+	if err != nil {
+		return &HashcatProbeResult{Status: "error", ReasonCode: "probe_materialization_failed", ErrorSummary: sanitizeHashcatEvidenceSummary(err.Error()), Version: r.hashcatVersion()}, nil
+	}
+	for _, path := range keyspace.CleanupPaths {
+		cleanupPath := strings.TrimSpace(path)
+		if cleanupPath == "" {
+			continue
+		}
+		defer func(targetPath string) {
+			_ = os.Remove(targetPath)
+		}(cleanupPath)
+	}
+
+	args := []string{"-m", strconv.Itoa(job.HashMode)}
+	if keyspace.AttackMode != nil {
+		args = append(args, "-a", strconv.Itoa(*keyspace.AttackMode))
+	}
+	args = append(args, job.Target)
+	args = append(args, keyspace.Inputs...)
+	args = append(args, "--potfile-disable", "--runtime", "1", "--status", "--status-timer=1")
+
+	procName := "hashcat_probe_" + keyspaceJobIDSanitizer.ReplaceAllString(probeID, "_")
+	proc, err := r.procManager.StartRaw(probeCtx, procName, r.hashcatPath, args)
+	if err != nil {
+		return &HashcatProbeResult{Status: "error", ReasonCode: "hashcat_probe_spawn_failed", ErrorSummary: sanitizeHashcatEvidenceSummary(err.Error()), Version: r.hashcatVersion()}, nil
+	}
+
+	evidence := newBoundedLineBuffer(maxHashcatEvidenceBytes)
+	var wg sync.WaitGroup
+	if proc.Stdout != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = process.ScanLines(proc.Stdout, func(line string) { evidence.Add(line) })
+		}()
+	}
+	if proc.Stderr != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = process.ScanLines(proc.Stderr, func(line string) { evidence.Add(line) })
+		}()
+	}
+
+	waitErr := proc.Wait()
+	wg.Wait()
+	_ = r.procManager.Stop(context.Background(), procName, time.Second)
+	if probeCtx.Err() == context.DeadlineExceeded {
+		return &HashcatProbeResult{Status: "error", ReasonCode: "hashcat_probe_timeout", ErrorSummary: sanitizeHashcatEvidenceSummary(evidence.String()), Version: r.hashcatVersion()}, nil
+	}
+	if reasonCode, ok := classifyHashcatUnsupported(evidence.String()); ok {
+		return &HashcatProbeResult{Status: "unsupported", ReasonCode: reasonCode, ErrorSummary: sanitizeHashcatEvidenceSummary(evidence.String()), Version: r.hashcatVersion()}, nil
+	}
+	if waitErr != nil {
+		summary := evidence.String()
+		if strings.TrimSpace(summary) == "" {
+			summary = waitErr.Error()
+		}
+		return &HashcatProbeResult{Status: "error", ReasonCode: "hashcat_probe_failed", ErrorSummary: sanitizeHashcatEvidenceSummary(summary), Version: r.hashcatVersion()}, nil
+	}
+	return &HashcatProbeResult{Status: "supported", ReasonCode: "ok", Version: r.hashcatVersion()}, nil
+}
+
+func (r *HashcatRunner) hashcatVersion() string {
+	return ""
+}
+
+func materializeProbeKeyspaceContract(job *pool.JobGPUMessage, probe *pool.HashcatCapabilityProbeMessage) (*materializedKeyspace, error) {
+	if job != nil && probe != nil && isProbeDictionarySlice(job.KeyspaceContract) && job.Dictionary != nil && strings.TrimSpace(job.Dictionary.RuntimePath) == "" {
+		wordlistPath, err := writeCandidateWordlist(job.JobID, []string{"xfo-probe-candidate"})
+		if err != nil {
+			return nil, err
+		}
+		attackMode := 0
+		if probe.JobShape.AttackMode != nil {
+			attackMode = *probe.JobShape.AttackMode
+		}
+		return &materializedKeyspace{
+			AttackMode:   &attackMode,
+			Inputs:       []string{wordlistPath},
+			Skip:         0,
+			Limit:        1,
+			CleanupPaths: []string{wordlistPath},
+		}, nil
+	}
+	keyspace, err := materializeKeyspaceContract(job.JobID, job.Dictionary, job.KeyspaceContract, 0, 1)
+	if err != nil {
+		return nil, err
+	}
+	if keyspace.AttackMode == nil && probe != nil && probe.JobShape.AttackMode != nil {
+		attackMode := *probe.JobShape.AttackMode
+		keyspace.AttackMode = &attackMode
+	}
+	return keyspace, nil
+}
+
+func isProbeDictionarySlice(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var contract keyspaceContract
+	if err := json.Unmarshal(raw, &contract); err != nil {
+		return false
+	}
+	return strings.TrimSpace(contract.Type) == "dictionary_slice"
 }
 
 func truncateForLog(s string, maxLen int) string {

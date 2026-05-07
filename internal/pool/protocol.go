@@ -80,6 +80,12 @@ type ResultMessage struct {
 	Data        string `json:"data"`
 }
 
+type HashcatUnsupportedData struct {
+	CapabilityFingerprint string `json:"capability_fingerprint,omitempty"`
+	ReasonCode            string `json:"reason_code"`
+	ErrorSummary          string `json:"error_summary,omitempty"`
+}
+
 type ProbeResultMessage struct {
 	Type        string `json:"type"`
 	ChallengeID string `json:"challenge_id"`
@@ -130,24 +136,25 @@ type ServerMessage struct {
 }
 
 type JobGPUMessage struct {
-	Type                 string          `json:"type"`
-	JobID                string          `json:"job_id"`
-	HashMode             int             `json:"hash_mode"`
-	Target               string          `json:"target"`
-	Dictionary           *DictionarySpec `json:"dictionary,omitempty"`
-	TargetURL            string          `json:"target_url,omitempty"`
-	TargetSHA256         string          `json:"target_sha256,omitempty"`
-	TargetFilename       string          `json:"target_filename,omitempty"`
-	ArtifactID           string          `json:"artifact_id,omitempty"`
-	TargetCanary         string          `json:"target_canary,omitempty"`
-	ChallengeID          string          `json:"challenge_id,omitempty"`
-	VerificationRequired bool            `json:"verification_required,omitempty"`
-	VerificationEpochID  string          `json:"verification_epoch_id,omitempty"`
-	KeyspaceContract     json.RawMessage `json:"keyspace_contract,omitempty"`
-	Skip                 int64           `json:"skip"`
-	Limit                int64           `json:"limit"`
-	ParentJobID          string          `json:"parent_job_id,omitempty"`
-	ChunkIndex           int             `json:"chunk_index,omitempty"`
+	Type                  string          `json:"type"`
+	JobID                 string          `json:"job_id"`
+	CapabilityFingerprint string          `json:"capability_fingerprint,omitempty"`
+	HashMode              int             `json:"hash_mode"`
+	Target                string          `json:"target"`
+	Dictionary            *DictionarySpec `json:"dictionary,omitempty"`
+	TargetURL             string          `json:"target_url,omitempty"`
+	TargetSHA256          string          `json:"target_sha256,omitempty"`
+	TargetFilename        string          `json:"target_filename,omitempty"`
+	ArtifactID            string          `json:"artifact_id,omitempty"`
+	TargetCanary          string          `json:"target_canary,omitempty"`
+	ChallengeID           string          `json:"challenge_id,omitempty"`
+	VerificationRequired  bool            `json:"verification_required,omitempty"`
+	VerificationEpochID   string          `json:"verification_epoch_id,omitempty"`
+	KeyspaceContract      json.RawMessage `json:"keyspace_contract,omitempty"`
+	Skip                  int64           `json:"skip"`
+	Limit                 int64           `json:"limit"`
+	ParentJobID           string          `json:"parent_job_id,omitempty"`
+	ChunkIndex            int             `json:"chunk_index,omitempty"`
 }
 
 type DictionarySpec struct {
@@ -194,4 +201,35 @@ type SendProbeMessage struct {
 	Type        string `json:"type"`
 	ChallengeID string `json:"challenge_id"`
 	Payload     []byte `json:"payload"`
+}
+
+type HashcatCapabilityProbeMessage struct {
+	Type                  string               `json:"type"`
+	ProbeID               string               `json:"probe_id"`
+	CapabilityFingerprint string               `json:"capability_fingerprint"`
+	JobShape              HashcatProbeJobShape `json:"job_shape"`
+	ProbePayload          HashcatProbePayload  `json:"probe_payload"`
+	TimeoutMS             int                  `json:"timeout_ms,omitempty"`
+}
+
+type HashcatProbeJobShape struct {
+	HashMode         int             `json:"hash_mode"`
+	AttackMode       *int            `json:"attack_mode,omitempty"`
+	Dictionary       *DictionarySpec `json:"dictionary,omitempty"`
+	KeyspaceContract json.RawMessage `json:"keyspace_contract,omitempty"`
+}
+
+type HashcatProbePayload struct {
+	TargetSample string   `json:"target_sample"`
+	Args         []string `json:"args,omitempty"`
+}
+
+type HashcatCapabilityProbeResultMessage struct {
+	Type                  string `json:"type"`
+	ProbeID               string `json:"probe_id"`
+	CapabilityFingerprint string `json:"capability_fingerprint"`
+	Status                string `json:"status"`
+	ReasonCode            string `json:"reason_code"`
+	HashcatVersion        string `json:"hashcat_version,omitempty"`
+	ErrorSummary          string `json:"error_summary,omitempty"`
 }

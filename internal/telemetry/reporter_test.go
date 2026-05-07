@@ -24,6 +24,9 @@ func (m *mockTelemetryPoolClient) SendResult(_ *pool.ResultMessage) error     { 
 func (m *mockTelemetryPoolClient) SendProbeResult(_ *pool.ProbeResultMessage) error {
 	return nil
 }
+func (m *mockTelemetryPoolClient) SendHashcatCapabilityProbeResult(_ *pool.HashcatCapabilityProbeResultMessage) error {
+	return nil
+}
 func (m *mockTelemetryPoolClient) SendContainerReady(_ *pool.ContainerReadyMessage) error {
 	return nil
 }
@@ -44,7 +47,7 @@ func (m *mockTelemetryPoolClient) SendTelemetryL2(msg *pool.TelemetryL2Message) 
 	return nil
 }
 func (m *mockTelemetryPoolClient) OnMessage(_ func(string, json.RawMessage)) {}
-func (m *mockTelemetryPoolClient) OnReconnect(_ func())                 {}
+func (m *mockTelemetryPoolClient) OnReconnect(_ func())                      {}
 
 func TestReporterReportsL1AndL2(t *testing.T) {
 	t.Parallel()

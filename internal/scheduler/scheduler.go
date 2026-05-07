@@ -36,6 +36,7 @@ const (
 
 type hashcatRunner interface {
 	Run(context.Context, *pool.JobGPUMessage, func(*pool.ProgressMessage), func(*pool.ResultMessage)) error
+	Probe(context.Context, *pool.HashcatCapabilityProbeMessage) (*HashcatProbeResult, error)
 }
 
 type containerRunner interface {
@@ -398,6 +399,16 @@ func normalizeSemverLike(ver string) string {
 	return v
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func (s *Scheduler) CurrentState() State {
 	s.stateMu.RLock()
 	defer s.stateMu.RUnlock()
@@ -542,7 +553,83 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 			return
 		}
 		s.handleSendProbe(ctx, &probe)
+	case "hashcat_capability_probe":
+		var probe pool.HashcatCapabilityProbeMessage
+		if err := json.Unmarshal(msg.raw, &probe); err != nil {
+			s.logger.Warn("invalid hashcat_capability_probe message", "error", err)
+			return
+		}
+		s.handleHashcatCapabilityProbe(ctx, &probe)
 	}
+}
+
+func (s *Scheduler) handleHashcatCapabilityProbe(ctx context.Context, probe *pool.HashcatCapabilityProbeMessage) {
+	msg := s.validateHashcatCapabilityProbe(probe)
+	if msg != nil {
+		if err := s.poolClient.SendHashcatCapabilityProbeResult(msg); err != nil {
+			s.logger.Error("failed to send rejected hashcat capability probe result", "probe_id", msg.ProbeID, "error", err)
+		}
+		return
+	}
+
+	result, err := s.hashcatRunner.Probe(ctx, probe)
+	if err != nil {
+		result = &HashcatProbeResult{
+			Status:       "error",
+			ReasonCode:   "hashcat_probe_internal_error",
+			ErrorSummary: sanitizeHashcatEvidenceSummary(err.Error()),
+		}
+	}
+	if result == nil {
+		result = &HashcatProbeResult{Status: "error", ReasonCode: "hashcat_probe_no_result"}
+	}
+	status := strings.TrimSpace(result.Status)
+	if status == "" {
+		status = "error"
+	}
+	reasonCode := strings.TrimSpace(result.ReasonCode)
+	if reasonCode == "" {
+		reasonCode = "hashcat_probe_unknown"
+	}
+	response := &pool.HashcatCapabilityProbeResultMessage{
+		Type:                  "hashcat_capability_probe_result",
+		ProbeID:               strings.TrimSpace(probe.ProbeID),
+		CapabilityFingerprint: strings.TrimSpace(probe.CapabilityFingerprint),
+		Status:                status,
+		ReasonCode:            reasonCode,
+		HashcatVersion:        firstNonEmpty(strings.TrimSpace(result.Version), s.capabilities.HashcatVersion),
+		ErrorSummary:          sanitizeHashcatEvidenceSummary(result.ErrorSummary),
+	}
+	if err := s.poolClient.SendHashcatCapabilityProbeResult(response); err != nil {
+		s.logger.Error("failed to send hashcat capability probe result", "probe_id", response.ProbeID, "status", response.Status, "error", err)
+	}
+}
+
+func (s *Scheduler) validateHashcatCapabilityProbe(probe *pool.HashcatCapabilityProbeMessage) *pool.HashcatCapabilityProbeResultMessage {
+	if probe == nil {
+		return &pool.HashcatCapabilityProbeResultMessage{Type: "hashcat_capability_probe_result", Status: "error", ReasonCode: "invalid_probe_contract", ErrorSummary: "probe payload is nil"}
+	}
+	probeID := strings.TrimSpace(probe.ProbeID)
+	fingerprint := strings.TrimSpace(probe.CapabilityFingerprint)
+	if probeID == "" {
+		return &pool.HashcatCapabilityProbeResultMessage{Type: "hashcat_capability_probe_result", CapabilityFingerprint: fingerprint, Status: "error", ReasonCode: "invalid_probe_contract", ErrorSummary: "missing probe_id"}
+	}
+	if fingerprint == "" {
+		return &pool.HashcatCapabilityProbeResultMessage{Type: "hashcat_capability_probe_result", ProbeID: probeID, Status: "error", ReasonCode: "invalid_probe_contract", ErrorSummary: "missing capability_fingerprint"}
+	}
+	if probe.JobShape.HashMode <= 0 {
+		return &pool.HashcatCapabilityProbeResultMessage{Type: "hashcat_capability_probe_result", ProbeID: probeID, CapabilityFingerprint: fingerprint, Status: "error", ReasonCode: "invalid_probe_contract", ErrorSummary: "invalid hash_mode"}
+	}
+	if strings.TrimSpace(probe.ProbePayload.TargetSample) == "" {
+		return &pool.HashcatCapabilityProbeResultMessage{Type: "hashcat_capability_probe_result", ProbeID: probeID, CapabilityFingerprint: fingerprint, Status: "error", ReasonCode: "invalid_probe_contract", ErrorSummary: "missing target_sample"}
+	}
+	if len(probe.ProbePayload.Args) > 0 {
+		return &pool.HashcatCapabilityProbeResultMessage{Type: "hashcat_capability_probe_result", ProbeID: probeID, CapabilityFingerprint: fingerprint, Status: "error", ReasonCode: "invalid_probe_contract", ErrorSummary: "probe_payload.args is not supported"}
+	}
+	if probe.TimeoutMS < 0 || probe.TimeoutMS > 30000 {
+		return &pool.HashcatCapabilityProbeResultMessage{Type: "hashcat_capability_probe_result", ProbeID: probeID, CapabilityFingerprint: fingerprint, Status: "error", ReasonCode: "invalid_probe_contract", ErrorSummary: "invalid timeout_ms"}
+	}
+	return nil
 }
 
 func (s *Scheduler) handleSendProbe(ctx context.Context, probe *pool.SendProbeMessage) {

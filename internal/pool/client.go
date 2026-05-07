@@ -23,6 +23,7 @@ type Client interface {
 	SendProgress(msg *ProgressMessage) error
 	SendResult(msg *ResultMessage) error
 	SendProbeResult(msg *ProbeResultMessage) error
+	SendHashcatCapabilityProbeResult(msg *HashcatCapabilityProbeResultMessage) error
 	SendContainerReady(msg *ContainerReadyMessage) error
 	SendTelemetryL1(msg *TelemetryL1Message) error
 	SendTelemetryL2(msg *TelemetryL2Message) error
@@ -39,11 +40,11 @@ type WSSClient struct {
 	reconnectBase     time.Duration
 	reconnectMax      time.Duration
 
-	mu        sync.RWMutex
-	conn      *websocket.Conn
-	callback  func(msgType string, raw json.RawMessage)
+	mu                sync.RWMutex
+	conn              *websocket.Conn
+	callback          func(msgType string, raw json.RawMessage)
 	reconnectCallback func()
-	sendQueue chan []byte
+	sendQueue         chan []byte
 
 	closeOnce sync.Once
 	closeCh   chan struct{}
@@ -324,6 +325,16 @@ func (c *WSSClient) SendProbeResult(msg *ProbeResultMessage) error {
 	return c.enqueue(msg)
 }
 
+func (c *WSSClient) SendHashcatCapabilityProbeResult(msg *HashcatCapabilityProbeResultMessage) error {
+	if msg == nil {
+		return errors.New("hashcat capability probe result message is nil")
+	}
+	if msg.Type == "" {
+		msg.Type = "hashcat_capability_probe_result"
+	}
+	return c.enqueue(msg)
+}
+
 func (c *WSSClient) SendContainerReady(msg *ContainerReadyMessage) error {
 	if msg == nil {
 		return errors.New("container message is nil")
@@ -459,6 +470,10 @@ func (c *NoopClient) SendResult(_ *ResultMessage) error {
 }
 
 func (c *NoopClient) SendProbeResult(_ *ProbeResultMessage) error {
+	return nil
+}
+
+func (c *NoopClient) SendHashcatCapabilityProbeResult(_ *HashcatCapabilityProbeResultMessage) error {
 	return nil
 }
 

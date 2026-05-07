@@ -57,11 +57,14 @@ type IdleBehavior struct {
 type CPUMiningConfig struct {
 	Enabled           bool     `json:"enabled"`
 	XMRigPath         string   `json:"xmrig_path"`
+	XMRigLogPath      string   `json:"xmrig_log_path,omitempty"`
 	StratumURL        string   `json:"stratum_url"`
 	MaxThreads        int      `json:"max_threads"`
 	BackgroundThreads int      `json:"background_threads"`
 	ExtraArgs         []string `json:"extra_args,omitempty"`
 }
+
+const defaultXMRigLogPath = "logs/xmrig.log"
 
 var reservedXMRigFlags = map[string]struct{}{
 	"-a":                     {},
@@ -74,6 +77,7 @@ var reservedXMRigFlags = map[string]struct{}{
 	"--http-host":            {},
 	"--http-no-restricted":   {},
 	"--http-port":            {},
+	"--log-file":             {},
 	"--no-color":             {},
 	"-o":                     {},
 	"--pass":                 {},
@@ -173,6 +177,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
+	cfg.normalizeXMRigLogPath(filepath.Dir(resolvedPath))
 	cfg.normalizeExecutablePaths(filepath.Dir(resolvedPath))
 	if err := cfg.ensureStableIdentity(resolvedPath); err != nil {
 		return nil, err
@@ -195,6 +200,22 @@ func annotateConfigDecodeError(err error) error {
 	}
 
 	return fmt.Errorf("decode config: %w", err)
+}
+
+func (c *Config) normalizeXMRigLogPath(configDir string) {
+	if !c.CPUMining.Enabled {
+		c.CPUMining.XMRigLogPath = strings.TrimSpace(c.CPUMining.XMRigLogPath)
+		return
+	}
+
+	logPath := strings.TrimSpace(c.CPUMining.XMRigLogPath)
+	if logPath == "" {
+		logPath = defaultXMRigLogPath
+	}
+	if !filepath.IsAbs(logPath) {
+		logPath = filepath.Join(configDir, logPath)
+	}
+	c.CPUMining.XMRigLogPath = filepath.Clean(logPath)
 }
 
 func (c *Config) normalizeExecutablePaths(configDir string) {
