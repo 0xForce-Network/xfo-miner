@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0xforce/xfo-miner/internal/debuglog"
 	"github.com/ulikunitz/xz/lzma"
 )
 
@@ -28,6 +30,7 @@ var (
 const (
 	defaultDictionaryMinAvailableBytes = uint64(2 * 1024 * 1024 * 1024)
 	defaultDictionaryMaxExtractBytes   = int64(1024 * 1024 * 1024)
+	defaultDictionaryHTTPClientTimeout = 15 * time.Minute
 )
 
 var errDictionaryExtractionQuotaExceeded = errors.New("dictionary_extraction_quota_exceeded")
@@ -67,6 +70,7 @@ type DictionaryCache struct {
 	statAvailableBytes func(string) (uint64, error)
 	minAvailableBytes  uint64
 	maxExtractBytes    int64
+	logger             *slog.Logger
 }
 
 func NewDictionaryCache(baseDir string, client *http.Client) *DictionaryCache {
@@ -74,7 +78,7 @@ func NewDictionaryCache(baseDir string, client *http.Client) *DictionaryCache {
 		baseDir = filepath.Join(os.TempDir(), "xfo-miner", "dicts")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
+		client = &http.Client{Timeout: defaultDictionaryHTTPClientTimeout}
 	}
 	return &DictionaryCache{
 		baseDir:            baseDir,
@@ -82,6 +86,7 @@ func NewDictionaryCache(baseDir string, client *http.Client) *DictionaryCache {
 		statAvailableBytes: statAvailableBytes,
 		minAvailableBytes:  defaultDictionaryMinAvailableBytes,
 		maxExtractBytes:    defaultDictionaryMaxExtractBytes,
+		logger:             slog.Default(),
 	}
 }
 
@@ -107,6 +112,7 @@ func (c *DictionaryCache) Ensure(ctx context.Context, spec DictionaryCacheSpec) 
 	blobPath := filepath.Join(c.baseDir, normalized.DictID+".lzma")
 
 	if hit, hitErr := c.isMaterializedHit(dictPath, metadataPath, normalized); hitErr == nil && hit {
+		c.logDebug("dictionary_cache_hit", "dict_id", normalized.DictID, "dict_path", dictPath, "metadata_path", metadataPath)
 		return DictionaryCacheResult{DictPath: dictPath, MetadataPath: metadataPath, BlobPath: blobPath, Materialized: true}, nil
 	}
 
@@ -114,11 +120,16 @@ func (c *DictionaryCache) Ensure(ctx context.Context, spec DictionaryCacheSpec) 
 	tmpDictPath := filepath.Join(tmpDir, normalized.DictID+".extract.tmp")
 	_ = os.Remove(tmpBlobPath)
 	_ = os.Remove(tmpDictPath)
-	if err := c.downloadFile(ctx, normalized.DictURL, tmpBlobPath); err != nil {
+	c.logDebug("dictionary_download_started", "dict_id", normalized.DictID, "url", normalized.DictURL, "timeout", c.clientTimeoutString())
+	downloadStartedAt := time.Now()
+	downloadedBytes, err := c.downloadFile(ctx, normalized, tmpBlobPath)
+	if err != nil {
 		_ = os.Remove(tmpBlobPath)
 		return DictionaryCacheResult{}, fmt.Errorf("%w: %v", ErrDictionaryDownloadFailed, err)
 	}
+	c.logDebug("dictionary_download_completed", "dict_id", normalized.DictID, "bytes", downloadedBytes, "duration_ms", time.Since(downloadStartedAt).Milliseconds())
 
+	c.logDebug("dictionary_checksum_started", "dict_id", normalized.DictID, "checksum", normalized.Checksum)
 	ok, verifyErr := verifyFileSHA256(tmpBlobPath, normalized.Checksum)
 	if verifyErr != nil {
 		_ = os.Remove(tmpBlobPath)
@@ -128,17 +139,23 @@ func (c *DictionaryCache) Ensure(ctx context.Context, spec DictionaryCacheSpec) 
 		_ = os.Remove(tmpBlobPath)
 		return DictionaryCacheResult{}, ErrDictionaryChecksumMismatch
 	}
+	c.logDebug("dictionary_checksum_completed", "dict_id", normalized.DictID)
 
+	c.logDebug("dictionary_disk_preflight_started", "dict_id", normalized.DictID, "base_dir", c.baseDir, "min_available_bytes", c.minAvailableBytes)
 	if err := c.ensureDiskAvailable(c.baseDir); err != nil {
 		_ = os.Remove(tmpBlobPath)
 		return DictionaryCacheResult{}, err
 	}
+	c.logDebug("dictionary_disk_preflight_completed", "dict_id", normalized.DictID)
 
+	c.logDebug("dictionary_extraction_started", "dict_id", normalized.DictID, "compress_format", normalized.CompressFormat, "max_extract_bytes", c.maxExtractBytes)
+	extractStartedAt := time.Now()
 	if err := c.extractLZMAToText(tmpBlobPath, tmpDictPath); err != nil {
 		_ = os.Remove(tmpBlobPath)
 		_ = os.Remove(tmpDictPath)
 		return DictionaryCacheResult{}, err
 	}
+	c.logDebug("dictionary_extraction_completed", "dict_id", normalized.DictID, "duration_ms", time.Since(extractStartedAt).Milliseconds())
 
 	_ = os.Remove(blobPath)
 	if err := os.Rename(tmpBlobPath, blobPath); err != nil {
@@ -168,7 +185,19 @@ func (c *DictionaryCache) Ensure(ctx context.Context, spec DictionaryCacheSpec) 
 		return DictionaryCacheResult{}, err
 	}
 
+	c.logDebug("dictionary_materialized", "dict_id", normalized.DictID, "dict_path", dictPath, "blob_path", blobPath, "metadata_path", metadataPath)
 	return DictionaryCacheResult{DictPath: dictPath, MetadataPath: metadataPath, BlobPath: blobPath, Materialized: true}, nil
+}
+
+func (c *DictionaryCache) logDebug(event string, args ...any) {
+	debuglog.Log(event, args...)
+}
+
+func (c *DictionaryCache) clientTimeoutString() string {
+	if c == nil || c.client == nil || c.client.Timeout <= 0 {
+		return "none"
+	}
+	return c.client.Timeout.String()
 }
 
 func (c *DictionaryCache) ensureDiskAvailable(path string) error {
@@ -317,30 +346,32 @@ func writeDictionaryMetadataAtomically(path string, metadata dictionaryCacheMeta
 	return nil
 }
 
-func (c *DictionaryCache) downloadFile(ctx context.Context, remoteURL string, outputPath string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, remoteURL, nil)
+func (c *DictionaryCache) downloadFile(ctx context.Context, spec DictionaryCacheSpec, outputPath string) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, spec.DictURL, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return 0, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
+	c.logDebug("dictionary_download_response_accepted", "dict_id", spec.DictID, "url", spec.DictURL, "status_code", resp.StatusCode, "content_length", resp.ContentLength)
 
 	f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer f.Close()
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		return err
+	written, err := io.Copy(f, resp.Body)
+	if err != nil {
+		return written, err
 	}
-	return nil
+	return written, nil
 }

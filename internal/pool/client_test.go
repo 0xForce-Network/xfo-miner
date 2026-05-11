@@ -173,6 +173,68 @@ func TestOnMessageDispatch(t *testing.T) {
 	}
 }
 
+func TestOnMessageDispatchJSONRPCMethodParams(t *testing.T) {
+	t.Parallel()
+
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		payload := map[string]any{
+			"method": "hashcat_capability_probe",
+			"params": map[string]any{
+				"probe_id":               "probe-jsonrpc-1",
+				"capability_fingerprint": "sha256:abc",
+				"job_shape": map[string]any{
+					"hash_mode": 26620,
+				},
+				"probe_payload": map[string]any{
+					"target_sample": "$metamask$sample",
+				},
+			},
+		}
+		_ = conn.WriteJSON(payload)
+		<-time.After(100 * time.Millisecond)
+	}))
+	defer server.Close()
+
+	client := NewWSSClient(testLogger(), WithHeartbeatInterval(time.Hour), WithPingInterval(time.Hour))
+	defer client.Close()
+
+	type callbackEvent struct {
+		msgType string
+		raw     json.RawMessage
+	}
+	got := make(chan callbackEvent, 1)
+	client.OnMessage(func(msgType string, raw json.RawMessage) {
+		got <- callbackEvent{msgType: msgType, raw: raw}
+	})
+
+	if err := client.Connect(context.Background(), wsURL(server.URL)); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+
+	select {
+	case event := <-got:
+		if event.msgType != "hashcat_capability_probe" {
+			t.Fatalf("unexpected type: %s", event.msgType)
+		}
+		var probe HashcatCapabilityProbeMessage
+		if err := json.Unmarshal(event.raw, &probe); err != nil {
+			t.Fatalf("callback raw params did not unmarshal as probe: %v", err)
+		}
+		if probe.ProbeID != "probe-jsonrpc-1" || probe.CapabilityFingerprint != "sha256:abc" || probe.JobShape.HashMode != 26620 {
+			t.Fatalf("unexpected probe params: %#v", probe)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting callback")
+	}
+}
+
 func TestReconnectOnDisconnect(t *testing.T) {
 	t.Parallel()
 

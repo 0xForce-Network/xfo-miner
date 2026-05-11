@@ -19,10 +19,13 @@ const (
 )
 
 var (
-	longHexTokenRegex    = regexp.MustCompile(`(?i)\b[0-9a-f]{32,}\b`)
-	longBase64TokenRegex = regexp.MustCompile(`\b[A-Za-z0-9+/]{48,}={0,2}\b`)
-	metamaskLineRegex    = regexp.MustCompile(`(?i)\$metamask[^\s]*`)
-	longDigitTokenRegex  = regexp.MustCompile(`\b\d{16,}\b`)
+	longHexTokenRegex                 = regexp.MustCompile(`(?i)\b[0-9a-f]{32,}\b`)
+	longBase64TokenRegex              = regexp.MustCompile(`\b[A-Za-z0-9+/]{48,}={0,2}\b`)
+	metamaskLineRegex                 = regexp.MustCompile(`(?i)\$metamask[^\s]*`)
+	longDigitTokenRegex               = regexp.MustCompile(`\b\d{16,}\b`)
+	hashcatProbeStatusExhaustedRegex  = regexp.MustCompile(`(?i)\bStatus\.*:\s*Exhausted\b`)
+	hashcatProbeProgressCompleteRegex = regexp.MustCompile(`(?i)\bProgress\.*:\s*\d+/\d+\s*\(100(?:\.0+)?%\)`)
+	hashcatProbeRecoveredNoneRegex    = regexp.MustCompile(`(?i)\bRecovered\.*:\s*0/\d+\s*\(0(?:\.0+)?%\)`)
 )
 
 type boundedLineBuffer struct {
@@ -114,6 +117,16 @@ func classifyHashcatUnsupported(text string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func isHashcatProbeCompletedWithoutCrack(text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	if hashcatProbeStatusExhaustedRegex.MatchString(text) {
+		return true
+	}
+	return hashcatProbeRecoveredNoneRegex.MatchString(text) && hashcatProbeProgressCompleteRegex.MatchString(text)
 }
 
 func containsAny(text string, needles ...string) bool {

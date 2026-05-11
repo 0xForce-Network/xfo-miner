@@ -373,6 +373,9 @@ func (r *HashcatRunner) Probe(ctx context.Context, probe *pool.HashcatCapability
 		return &HashcatProbeResult{Status: "unsupported", ReasonCode: reasonCode, ErrorSummary: sanitizeHashcatEvidenceSummary(evidence.String()), Version: r.hashcatVersion()}, nil
 	}
 	if waitErr != nil {
+		if isHashcatProbeCompletedWithoutCrack(evidence.String()) {
+			return &HashcatProbeResult{Status: "supported", ReasonCode: "ok", Version: r.hashcatVersion()}, nil
+		}
 		summary := evidence.String()
 		if strings.TrimSpace(summary) == "" {
 			summary = waitErr.Error()

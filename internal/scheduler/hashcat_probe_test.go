@@ -77,6 +77,31 @@ func TestHashcatRunnerProbeSupported(t *testing.T) {
 	}
 }
 
+func TestHashcatRunnerProbeTreatsCompletedNoMatchAsSupported(t *testing.T) {
+	tempDir := t.TempDir()
+	fakeHashcatPath := filepath.Join(tempDir, "fake_hashcat_probe_completed_no_match.sh")
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		"echo 'Recovered........: 0/1 (0.00%) Digests (total), 0/1 (0.00%) Digests (new)'",
+		"echo 'Progress.........: 1/1 (100.00%)'",
+		"echo 'Status...........: Exhausted'",
+		"exit 1",
+	}, "\n") + "\n"
+	if err := os.WriteFile(fakeHashcatPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake hashcat script: %v", err)
+	}
+
+	runner := NewHashcatRunner(process.NewRealManager(discardLogger()), fakeHashcatPath, discardLogger())
+	result, err := runner.Probe(context.Background(), sampleHashcatProbe(5000))
+	if err != nil {
+		t.Fatalf("Probe() error = %v", err)
+	}
+	if result.Status != "supported" || result.ReasonCode != "ok" {
+		t.Fatalf("expected completed no-match probe to be supported ok, got %#v", result)
+	}
+}
+
 func TestHashcatRunnerProbeUnsupported(t *testing.T) {
 	tempDir := t.TempDir()
 	fakeHashcatPath := filepath.Join(tempDir, "fake_hashcat_probe_unsupported.sh")

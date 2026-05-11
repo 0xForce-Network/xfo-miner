@@ -9,9 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/0xforce/xfo-miner/internal/debuglog"
 	"github.com/ulikunitz/xz/lzma"
 )
 
@@ -147,6 +150,143 @@ func TestDictionaryCacheExtractionQuotaExceededFailClosed(t *testing.T) {
 	assertFileNotExists(t, filepath.Join(baseDir, "bt2024.lzma"))
 	assertFileNotExists(t, filepath.Join(baseDir, ".tmp", "bt2024.download.tmp"))
 	assertFileNotExists(t, filepath.Join(baseDir, ".tmp", "bt2024.extract.tmp"))
+}
+
+func TestDictionaryCacheDefaultClientAllowsSlowDictionaryDownloads(t *testing.T) {
+	t.Parallel()
+
+	cache := NewDictionaryCache(t.TempDir(), nil)
+	if cache.client == nil {
+		t.Fatalf("expected default HTTP client")
+	}
+	if cache.client.Timeout < 15*time.Minute {
+		t.Fatalf("expected dictionary HTTP timeout >= 15m, got %s", cache.client.Timeout)
+	}
+}
+
+func TestDictionaryCacheStageLogsRequireDebugEnabled(t *testing.T) {
+	if err := debuglog.Close(); err != nil {
+		t.Fatalf("close pre-existing debug log: %v", err)
+	}
+
+	body := mustLZMABytes(t, []byte("alpha\nbeta\n"))
+	checksum := sha256Hex(body)
+
+	var hitCount int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hitCount, 1)
+		_, _ = w.Write(body)
+	}))
+	defer ts.Close()
+
+	cache := NewDictionaryCache(t.TempDir(), ts.Client())
+	cache.minAvailableBytes = 1
+	cache.statAvailableBytes = func(string) (uint64, error) {
+		return 10 * 1024 * 1024 * 1024, nil
+	}
+	spec := DictionaryCacheSpec{
+		DictID:         "bt2024",
+		DictURL:        ts.URL + "/dicts/bt2024.txt.lzma",
+		CompressFormat: "lzma",
+		Checksum:       checksum,
+		LineCount:      2,
+	}
+
+	if _, err := cache.Ensure(context.Background(), spec); err != nil {
+		t.Fatalf("Ensure() without debug error = %v", err)
+	}
+	if debuglog.Enabled() {
+		t.Fatalf("expected debug log to remain disabled")
+	}
+
+	debugPath := filepath.Join(t.TempDir(), "miner-debug.jsonl")
+	if err := debuglog.Enable(debugPath, false); err != nil {
+		t.Fatalf("enable debug log: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = debuglog.Close()
+	})
+
+	if _, err := cache.Ensure(context.Background(), spec); err != nil {
+		t.Fatalf("Ensure() with debug cache hit error = %v", err)
+	}
+	if err := debuglog.Close(); err != nil {
+		t.Fatalf("close debug log: %v", err)
+	}
+
+	raw, err := os.ReadFile(debugPath)
+	if err != nil {
+		t.Fatalf("read debug log: %v", err)
+	}
+	if !strings.Contains(string(raw), `"debug_event":"dictionary_cache_hit"`) {
+		t.Fatalf("expected dictionary cache hit debug event, got %s", string(raw))
+	}
+	if got := atomic.LoadInt32(&hitCount); got != 1 {
+		t.Fatalf("expected cache hit to avoid redownload, got hits=%d", got)
+	}
+}
+
+func TestDictionaryCacheDownloadStageLogsWhenDebugEnabled(t *testing.T) {
+	if err := debuglog.Close(); err != nil {
+		t.Fatalf("close pre-existing debug log: %v", err)
+	}
+
+	body := mustLZMABytes(t, []byte("alpha\nbeta\ngamma\n"))
+	checksum := sha256Hex(body)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer ts.Close()
+
+	debugPath := filepath.Join(t.TempDir(), "miner-debug.jsonl")
+	if err := debuglog.Enable(debugPath, false); err != nil {
+		t.Fatalf("enable debug log: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = debuglog.Close()
+	})
+
+	cache := NewDictionaryCache(t.TempDir(), ts.Client())
+	cache.minAvailableBytes = 1
+	cache.statAvailableBytes = func(string) (uint64, error) {
+		return 10 * 1024 * 1024 * 1024, nil
+	}
+	_, err := cache.Ensure(context.Background(), DictionaryCacheSpec{
+		DictID:         "bt2024",
+		DictURL:        ts.URL + "/dicts/bt2024.txt.lzma",
+		CompressFormat: "lzma",
+		Checksum:       checksum,
+		LineCount:      3,
+	})
+	if err != nil {
+		t.Fatalf("Ensure() with debug error = %v", err)
+	}
+	if err := debuglog.Close(); err != nil {
+		t.Fatalf("close debug log: %v", err)
+	}
+
+	raw, err := os.ReadFile(debugPath)
+	if err != nil {
+		t.Fatalf("read debug log: %v", err)
+	}
+	logText := string(raw)
+	for _, event := range []string{
+		"dictionary_download_started",
+		"dictionary_download_response_accepted",
+		"dictionary_download_completed",
+		"dictionary_checksum_started",
+		"dictionary_checksum_completed",
+		"dictionary_disk_preflight_started",
+		"dictionary_disk_preflight_completed",
+		"dictionary_extraction_started",
+		"dictionary_extraction_completed",
+		"dictionary_materialized",
+	} {
+		if !strings.Contains(logText, `"debug_event":"`+event+`"`) {
+			t.Fatalf("expected debug event %s in log: %s", event, logText)
+		}
+	}
 }
 
 func mustLZMABytes(t *testing.T, plain []byte) []byte {

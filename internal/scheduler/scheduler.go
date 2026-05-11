@@ -889,6 +889,9 @@ func (s *Scheduler) enterWPAAudit(ctx context.Context, job *pool.JobGPUMessage) 
 				"result_data", msg.Data,
 				"is_verification_job", isVerificationJob,
 			)
+			if isWalletRecoveryResultJob(job) && verificationResultSucceeded(msg) {
+				msg.ResultKind = "wallet_result"
+			}
 			if isVerificationJob && verificationResultSucceeded(msg) {
 				verificationSucceeded = true
 				s.logger.Info("[enterWPAAudit] verification succeeded", "job_id", job.JobID)
@@ -898,6 +901,7 @@ func (s *Scheduler) enterWPAAudit(ctx context.Context, job *pool.JobGPUMessage) 
 				"job_id", job.JobID,
 				"parent_job_id", job.ParentJobID,
 				"status", msg.Status,
+				"result_kind", msg.ResultKind,
 				"data", msg.Data,
 			)
 			if err := s.poolClient.SendResult(msg); err != nil {
@@ -954,9 +958,24 @@ func verificationResultSucceeded(msg *pool.ResultMessage) bool {
 	return strings.EqualFold(strings.TrimSpace(msg.Status), "cracked")
 }
 
+func isWalletRecoveryResultJob(job *pool.JobGPUMessage) bool {
+	if job == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(job.TaskType), "wallet_recovery") {
+		return true
+	}
+	verificationType := strings.ToLower(strings.TrimSpace(job.VerificationType))
+	return strings.HasPrefix(verificationType, "wallet_recovery")
+}
+
 func (s *Scheduler) resolveHashcatTarget(ctx context.Context, job *pool.JobGPUMessage) (string, error) {
 	if job == nil {
 		return "", ErrInvalidRemoteTargetContract
+	}
+
+	if isDictionarySliceContract(job.KeyspaceContract) && job.Dictionary != nil {
+		return strings.TrimSpace(job.Target), nil
 	}
 
 	if strings.TrimSpace(job.TargetURL) == "" {

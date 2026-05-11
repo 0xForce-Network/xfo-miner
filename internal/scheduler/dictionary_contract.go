@@ -77,3 +77,11 @@ func readKeyspaceContractType(raw json.RawMessage) (string, error) {
 	}
 	return strings.TrimSpace(contract.Type), nil
 }
+
+func isDictionarySliceContract(raw json.RawMessage) bool {
+	keyspaceType, err := readKeyspaceContractType(raw)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(keyspaceType, "dictionary_slice")
+}

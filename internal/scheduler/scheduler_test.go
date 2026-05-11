@@ -703,6 +703,40 @@ func TestSchedulerTransitionToWPAAudit(t *testing.T) {
 	waitFor(t, func() bool { return detached.stopCount() >= 1 })
 }
 
+func TestSchedulerWalletRecoveryCrackedResultCarriesResultKind(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.hashcatRunner = &statusHashcatRunner{status: "cracked", data: "12345678"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:             "job_gpu",
+		JobID:            "wr-job-1",
+		ParentJobID:      "wr-parent-1",
+		HashMode:         26620,
+		Target:           "metamask-hash",
+		TaskType:         "wallet_recovery",
+		VerificationType: "wallet_recovery_canary_v1",
+		Skip:             0,
+		Limit:            1,
+	})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "wr-job-1"
+	})
+	result := pcl.latestResult()
+	if result.ResultKind != "wallet_result" {
+		t.Fatalf("expected wallet_result result_kind, got %q", result.ResultKind)
+	}
+	if result.ParentJobID != "wr-parent-1" {
+		t.Fatalf("expected parent job id propagated, got %q", result.ParentJobID)
+	}
+}
+
 func TestSchedulerTransitionToWPAAuditResolvesRemoteTarget(t *testing.T) {
 	s, _, pcl, detached := newTestScheduler()
 	runner := &capturingHashcatRunner{}
@@ -1150,6 +1184,45 @@ func TestSchedulerTransitionToWPAAuditInjectsDictionaryRuntimePath(t *testing.T)
 	})
 
 	waitFor(t, func() bool { return runner.RunCount() >= 1 })
+	if got := runner.LastDictionaryRuntimePath(); got != "/tmp/xfo-miner/dicts/bt2024.txt" {
+		t.Fatalf("expected dictionary runtime path to be injected, got %q", got)
+	}
+}
+
+func TestSchedulerDictionarySliceAllowsEmptyTarget(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+	s.dictionaryCache = &mockDictionaryCache{ensure: func(_ context.Context, _ DictionaryCacheSpec) (DictionaryCacheResult, error) {
+		return DictionaryCacheResult{DictPath: "/tmp/xfo-miner/dicts/bt2024.txt", Materialized: true}, nil
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{
+		Type:     "job_gpu",
+		JobID:    "job-dictionary-slice-no-target",
+		HashMode: 26620,
+		Dictionary: &pool.DictionarySpec{
+			DictID:         "bt2024",
+			DictURL:        "https://update.xfo.network/dicts/bt2024.txt.lzma",
+			CompressFormat: "lzma",
+			Checksum:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			LineCount:      100,
+		},
+		KeyspaceContract: json.RawMessage(`{"type":"dictionary_slice","skip":0,"limit":7}`),
+		Skip:             0,
+		Limit:            7,
+	})
+
+	waitFor(t, func() bool { return runner.RunCount() >= 1 })
+	if got := runner.LastTarget(); got != "" {
+		t.Fatalf("expected empty target to pass through dictionary_slice runtime, got %q", got)
+	}
 	if got := runner.LastDictionaryRuntimePath(); got != "/tmp/xfo-miner/dicts/bt2024.txt" {
 		t.Fatalf("expected dictionary runtime path to be injected, got %q", got)
 	}

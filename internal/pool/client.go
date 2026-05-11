@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -227,15 +228,29 @@ func (c *WSSClient) readLoop(conn *websocket.Conn, errCh chan<- error) {
 		}
 
 		var envelope struct {
-			Type string `json:"type"`
+			Type   string          `json:"type"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
 		}
 		if err := json.Unmarshal(payload, &envelope); err != nil {
 			continue
 		}
 
+		msgType := strings.TrimSpace(envelope.Type)
+		raw := json.RawMessage(payload)
+		if msgType == "" && strings.TrimSpace(envelope.Method) != "" {
+			msgType = strings.TrimSpace(envelope.Method)
+			if len(envelope.Params) > 0 && string(envelope.Params) != "null" {
+				raw = envelope.Params
+			}
+		}
+		if msgType == "" {
+			continue
+		}
+
 		cb := c.getCallback()
 		if cb != nil {
-			cb(envelope.Type, payload)
+			cb(msgType, raw)
 		}
 	}
 }

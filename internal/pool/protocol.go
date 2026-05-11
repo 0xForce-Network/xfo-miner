@@ -77,6 +77,7 @@ type ResultMessage struct {
 	JobID       string `json:"job_id"`
 	ParentJobID string `json:"parent_job_id,omitempty"`
 	Status      string `json:"status"`
+	ResultKind  string `json:"result_kind,omitempty"`
 	Data        string `json:"data"`
 }
 
@@ -147,6 +148,8 @@ type JobGPUMessage struct {
 	TargetFilename        string          `json:"target_filename,omitempty"`
 	ArtifactID            string          `json:"artifact_id,omitempty"`
 	TargetCanary          string          `json:"target_canary,omitempty"`
+	TaskType              string          `json:"task_type,omitempty"`
+	VerificationType      string          `json:"verification_type,omitempty"`
 	ChallengeID           string          `json:"challenge_id,omitempty"`
 	VerificationRequired  bool            `json:"verification_required,omitempty"`
 	VerificationEpochID   string          `json:"verification_epoch_id,omitempty"`
