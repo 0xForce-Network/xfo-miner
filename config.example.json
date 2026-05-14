@@ -17,7 +17,9 @@
   "idle_behavior": {
     "enabled": false,
     "grace_period_sec": 5,
+    "restart_cooldown_sec": 120,
     "command": "",
-    "args": ""
+    "args": "",
+    "args_array": []
   }
 }

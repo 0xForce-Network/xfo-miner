@@ -34,6 +34,8 @@ const (
 	otaJitterMaxSec           = 1800
 )
 
+var ErrIdleMinerStopFailed = errors.New("idle_miner_stop_failed")
+
 type hashcatRunner interface {
 	Run(context.Context, *pool.JobGPUMessage, func(*pool.ProgressMessage), func(*pool.ResultMessage)) error
 	Probe(context.Context, *pool.HashcatCapabilityProbeMessage) (*HashcatProbeResult, error)
@@ -83,7 +85,11 @@ type Scheduler struct {
 	updater         otaUpdater
 	newPoller       func(currentVer updater.Version, onUpdate func(context.Context, *pool.OTAUpdateMessage) error) otaPoller
 	messageCh       chan inboundMessage
+	idleMu          sync.Mutex
 	idleMinerPid    int
+	idleUnavailable bool
+	idleRestoreMu   sync.Mutex
+	idleRestoreGen  uint64
 	loginDevices    []pool.GPUIdentity
 	scanGPUs        func() ([]telemetry.GPUDevice, error)
 	startDetached   func(command string, args []string) (*process.DetachedProcess, error)
@@ -826,8 +832,9 @@ func (s *Scheduler) enterStandby(ctx context.Context) error {
 }
 
 func (s *Scheduler) enterWPAAudit(ctx context.Context, job *pool.JobGPUMessage) error {
+	s.cancelIdleMinerRestore()
 	s.setState(StateWPAAudit)
-	defer s.restoreStandby(context.Background())
+	defer s.restoreStandbyWithIdleCooldown(context.Background())
 	s.setActiveWPATask(true)
 	defer s.setActiveWPATask(false)
 
@@ -852,6 +859,7 @@ func (s *Scheduler) enterWPAAudit(ctx context.Context, job *pool.JobGPUMessage) 
 
 	if err := s.stopIdleMiner(ctx); err != nil {
 		s.logger.Error("[enterWPAAudit] stopIdleMiner failed", "job_id", job.JobID, "error", err)
+		s.reportJobFailure(job, err)
 		return err
 	}
 	if err := s.xmrigManager.SetHeartbeatMode(ctx); err != nil {
@@ -904,12 +912,13 @@ func (s *Scheduler) enterWPAAudit(ctx context.Context, job *pool.JobGPUMessage) 
 				"result_kind", msg.ResultKind,
 				"data", msg.Data,
 			)
-			if err := s.poolClient.SendResult(msg); err != nil {
+			if err := s.sendResultWithRetry(msg); err != nil {
 				s.logger.Error("failed to send hashcat result to pool",
 					"job_id", job.JobID,
 					"parent_job_id", job.ParentJobID,
 					"status", msg.Status,
 					"error", err,
+					"critical", true,
 				)
 			} else {
 				s.logger.Info("[enterWPAAudit] result sent to pool successfully",
@@ -1068,11 +1077,13 @@ func (s *Scheduler) reportJobFailure(job *pool.JobGPUMessage, err error) {
 		status = "dictionary_size_quota_exceeded"
 	case errors.Is(err, ErrDictionaryExtractFailed):
 		status = "dictionary_extract_failed"
+	case errors.Is(err, ErrIdleMinerStopFailed):
+		status = "idle_miner_stop_failed"
 	default:
 		status = "runtime_error"
 	}
 
-	if sendErr := s.poolClient.SendResult(&pool.ResultMessage{
+	if sendErr := s.sendResultWithRetry(&pool.ResultMessage{
 		Type:        "result",
 		JobID:       job.JobID,
 		ParentJobID: job.ParentJobID,
@@ -1098,7 +1109,7 @@ func (s *Scheduler) reportVerificationGateFailure(job *pool.JobGPUMessage, reaso
 		reason = "verification_state_invalid"
 	}
 
-	if err := s.poolClient.SendResult(&pool.ResultMessage{
+	if err := s.sendResultWithRetry(&pool.ResultMessage{
 		Type:        "result",
 		JobID:       job.JobID,
 		ParentJobID: job.ParentJobID,
@@ -1114,6 +1125,35 @@ func (s *Scheduler) reportVerificationGateFailure(job *pool.JobGPUMessage, reaso
 	}
 }
 
+func (s *Scheduler) sendResultWithRetry(msg *pool.ResultMessage) error {
+	if msg == nil {
+		return nil
+	}
+
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := s.poolClient.SendResult(msg); err != nil {
+			lastErr = err
+			s.logger.Warn("pool result send attempt failed",
+				"job_id", msg.JobID,
+				"parent_job_id", msg.ParentJobID,
+				"status", msg.Status,
+				"attempt", attempt,
+				"max_attempts", maxAttempts,
+				"error", err,
+			)
+			if attempt < maxAttempts {
+				time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+			}
+			continue
+		}
+		return nil
+	}
+
+	return fmt.Errorf("send result after %d attempts: %w", maxAttempts, lastErr)
+}
+
 func (s *Scheduler) setActiveWPATask(active bool) {
 	s.taskMu.Lock()
 	defer s.taskMu.Unlock()
@@ -1127,6 +1167,7 @@ func (s *Scheduler) hasActiveWPATask() bool {
 }
 
 func (s *Scheduler) enterAIContainer(ctx context.Context, job *pool.JobContainerMessage) error {
+	s.cancelIdleMinerRestore()
 	s.setState(StateAIContainer)
 	defer s.restoreStandby(context.Background())
 
@@ -1155,17 +1196,31 @@ func (s *Scheduler) restoreStandby(ctx context.Context) {
 	s.setState(StateStandby)
 }
 
+func (s *Scheduler) restoreStandbyWithIdleCooldown(ctx context.Context) {
+	if err := s.xmrigManager.SetFullMode(ctx); err != nil {
+		s.logger.Warn("failed to restore xmrig full mode", "error", err)
+	}
+	s.setState(StateStandby)
+	s.scheduleIdleMinerRestore(ctx)
+}
+
 func (s *Scheduler) startIdleMiner(ctx context.Context) error {
 	_ = ctx
 	idle := s.cfg.IdleBehavior
 	if !idle.Enabled || strings.TrimSpace(idle.Command) == "" {
 		return nil
 	}
+
+	s.idleMu.Lock()
+	defer s.idleMu.Unlock()
+	if s.idleUnavailable {
+		return fmt.Errorf("%w: idle miner runtime marked unavailable after a previous stop failure", ErrIdleMinerStopFailed)
+	}
 	if s.idleMinerPid > 0 && s.isDetachedAlive(s.idleMinerPid) {
 		return nil
 	}
 
-	args := strings.Fields(idle.Args)
+	args := idleMinerArgs(idle)
 	detached, err := s.startDetached(idle.Command, args)
 	if err != nil {
 		return fmt.Errorf("start idle miner detached: %w", err)
@@ -1177,6 +1232,8 @@ func (s *Scheduler) startIdleMiner(ctx context.Context) error {
 
 func (s *Scheduler) stopIdleMiner(ctx context.Context) error {
 	_ = ctx
+	s.idleMu.Lock()
+	defer s.idleMu.Unlock()
 	if s.idleMinerPid <= 0 {
 		return nil
 	}
@@ -1188,10 +1245,73 @@ func (s *Scheduler) stopIdleMiner(ctx context.Context) error {
 
 	err := s.stopDetached(s.idleMinerPid, graceSec)
 	if err != nil {
-		return fmt.Errorf("stop idle miner detached pid %d: %w", s.idleMinerPid, err)
+		s.idleUnavailable = true
+		return fmt.Errorf("%w: stop idle miner detached pid %d: %v", ErrIdleMinerStopFailed, s.idleMinerPid, err)
 	}
 
 	s.logger.Info("idle miner stopped (detached)", "pid", s.idleMinerPid)
 	s.idleMinerPid = 0
+	s.idleUnavailable = false
 	return nil
+}
+
+func idleMinerArgs(idle config.IdleBehavior) []string {
+	if len(idle.ArgsArray) > 0 {
+		args := make([]string, 0, len(idle.ArgsArray))
+		for _, arg := range idle.ArgsArray {
+			args = append(args, strings.TrimSpace(arg))
+		}
+		return args
+	}
+	return strings.Fields(idle.Args)
+}
+
+func (s *Scheduler) cancelIdleMinerRestore() {
+	s.idleRestoreMu.Lock()
+	s.idleRestoreGen++
+	s.idleRestoreMu.Unlock()
+}
+
+func (s *Scheduler) nextIdleRestoreGeneration() uint64 {
+	s.idleRestoreMu.Lock()
+	defer s.idleRestoreMu.Unlock()
+	s.idleRestoreGen++
+	return s.idleRestoreGen
+}
+
+func (s *Scheduler) isIdleRestoreCurrent(gen uint64) bool {
+	s.idleRestoreMu.Lock()
+	defer s.idleRestoreMu.Unlock()
+	return s.idleRestoreGen == gen
+}
+
+func (s *Scheduler) scheduleIdleMinerRestore(ctx context.Context) {
+	idle := s.cfg.IdleBehavior
+	if !idle.Enabled || strings.TrimSpace(idle.Command) == "" {
+		return
+	}
+
+	cooldownSec := idle.RestartCooldownSec
+	if cooldownSec <= 0 {
+		cooldownSec = 120
+	}
+	gen := s.nextIdleRestoreGeneration()
+	go func() {
+		timer := time.NewTimer(time.Duration(cooldownSec) * time.Second)
+		defer timer.Stop()
+
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return
+		}
+
+		if !s.isIdleRestoreCurrent(gen) || s.hasActiveWPATask() {
+			s.logger.Info("idle miner restore skipped after cooldown", "cooldown_sec", cooldownSec, "generation", gen)
+			return
+		}
+		if err := s.startIdleMiner(context.Background()); err != nil {
+			s.logger.Warn("failed to restart idle miner after cooldown", "cooldown_sec", cooldownSec, "error", err)
+		}
+	}()
 }

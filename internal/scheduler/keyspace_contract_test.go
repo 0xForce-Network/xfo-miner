@@ -89,6 +89,29 @@ func TestMaterializeKeyspaceContractMaskSegmentOverrideRange(t *testing.T) {
 	}
 }
 
+func TestMaterializeKeyspaceContractMaskSegmentCustomCharsets(t *testing.T) {
+	raw := []byte(`{"type":"mask_segment","mask":"?1?1?2?2","charset":"0123456789","custom_charset_2":"abcdef","skip":0,"limit":100}`)
+	materialized, err := materializeKeyspaceContract("job-mask-custom", nil, raw, 1, 2)
+	if err != nil {
+		t.Fatalf("materializeKeyspaceContract() error = %v", err)
+	}
+	if materialized.AttackMode == nil || *materialized.AttackMode != 3 {
+		t.Fatalf("expected attack mode 3 for mask_segment")
+	}
+	if len(materialized.Inputs) != 1 || materialized.Inputs[0] != "?1?1?2?2" {
+		t.Fatalf("unexpected mask input: %v", materialized.Inputs)
+	}
+	expectedOptions := []string{"-1", "0123456789", "-2", "abcdef"}
+	if len(materialized.Options) != len(expectedOptions) {
+		t.Fatalf("unexpected custom charset options: %v", materialized.Options)
+	}
+	for i, expected := range expectedOptions {
+		if materialized.Options[i] != expected {
+			t.Fatalf("custom charset option[%d]: expected %q, got %q", i, expected, materialized.Options[i])
+		}
+	}
+}
+
 func TestMaterializeKeyspaceContractRejectsInvalidFixedCandidateList(t *testing.T) {
 	raw := []byte(`{"type":"fixed_candidate_list","candidates":["", "ok"]}`)
 	_, err := materializeKeyspaceContract("job-invalid", nil, raw, 0, 1)

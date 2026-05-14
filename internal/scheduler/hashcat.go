@@ -70,6 +70,7 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 	r.logger.Info("[hashcat] keyspace materialized",
 		"job_id", job.JobID,
 		"attack_mode", keyspace.AttackMode,
+		"options", keyspace.Options,
 		"inputs", keyspace.Inputs,
 		"skip", keyspace.Skip,
 		"limit", keyspace.Limit,
@@ -102,6 +103,7 @@ func (r *HashcatRunner) Run(ctx context.Context, job *pool.JobGPUMessage, onProg
 	if keyspace.AttackMode != nil {
 		args = append(args, "-a", strconv.Itoa(*keyspace.AttackMode))
 	}
+	args = append(args, keyspace.Options...)
 	args = append(args, job.Target)
 	args = append(args, keyspace.Inputs...)
 	args = append(args,
@@ -336,6 +338,7 @@ func (r *HashcatRunner) Probe(ctx context.Context, probe *pool.HashcatCapability
 	if keyspace.AttackMode != nil {
 		args = append(args, "-a", strconv.Itoa(*keyspace.AttackMode))
 	}
+	args = append(args, keyspace.Options...)
 	args = append(args, job.Target)
 	args = append(args, keyspace.Inputs...)
 	args = append(args, "--potfile-disable", "--runtime", "1", "--status", "--status-timer=1")

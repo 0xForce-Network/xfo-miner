@@ -12,6 +12,7 @@ const (
 	HashcatUnsupportedReasonTokenShape        = "hashcat_token_shape_unsupported"
 	HashcatUnsupportedReasonHashFormat        = "hashcat_hash_format_unsupported"
 	HashcatUnsupportedReasonKernelUnsupported = "hashcat_kernel_unsupported"
+	HashcatUnsupportedReasonInvalidArguments  = "hashcat_invalid_arguments"
 
 	maxHashcatEvidenceBytes = 8192
 	maxHashcatSummaryBytes  = 512
@@ -114,6 +115,8 @@ func classifyHashcatUnsupported(text string) (string, bool) {
 		return HashcatUnsupportedReasonHashFormat, true
 	case containsAny(lower, "kernel unavailable", "no kernel available", "kernel not found", "opencl kernel", "module kernel"):
 		return HashcatUnsupportedReasonKernelUnsupported, true
+	case containsAny(lower, "custom-charset 1 is undefined", "custom-charset 2 is undefined", "custom-charset 3 is undefined", "custom-charset 4 is undefined", "unrecognized option", "invalid argument"):
+		return HashcatUnsupportedReasonInvalidArguments, true
 	default:
 		return "", false
 	}

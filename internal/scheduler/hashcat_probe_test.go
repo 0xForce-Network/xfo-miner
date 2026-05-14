@@ -26,6 +26,7 @@ func TestClassifyHashcatUnsupportedPatterns(t *testing.T) {
 		{name: "token", text: "Token length exception", reason: HashcatUnsupportedReasonTokenShape},
 		{name: "format", text: "Separator unmatched", reason: HashcatUnsupportedReasonHashFormat},
 		{name: "kernel", text: "OpenCL kernel unavailable", reason: HashcatUnsupportedReasonKernelUnsupported},
+		{name: "invalid custom charset", text: "Custom-charset 1 is undefined.", reason: HashcatUnsupportedReasonInvalidArguments},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -49,6 +49,72 @@ func TestLoadConfigAppliesDefaultCPUThreads(t *testing.T) {
 	}
 }
 
+func TestLoadConfigIdleBehaviorArgsArrayAndCooldown(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "idle-array.json")
+	content := `{
+	  "node_id": "node-1",
+	  "wallet_address": "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
+	  "worker_name": "worker-1",
+	  "pool_url": "wss://pool.example.com/ws",
+	  "max_cpu_threads": 1,
+	  "idle_behavior": {
+	    "enabled": true,
+	    "grace_period_sec": 5,
+	    "command": "idle-miner",
+	    "args": ["--pool", "stratum+tcp://pool.example:3333", "--user", "wallet name"]
+	  }
+	}`
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if cfg.IdleBehavior.RestartCooldownSec != 120 {
+		t.Fatalf("expected default restart cooldown 120, got %d", cfg.IdleBehavior.RestartCooldownSec)
+	}
+	want := []string{"--pool", "stratum+tcp://pool.example:3333", "--user", "wallet name"}
+	if len(cfg.IdleBehavior.ArgsArray) != len(want) {
+		t.Fatalf("unexpected args array length: got %d want %d", len(cfg.IdleBehavior.ArgsArray), len(want))
+	}
+	for idx := range want {
+		if cfg.IdleBehavior.ArgsArray[idx] != want[idx] {
+			t.Fatalf("unexpected idle arg[%d]: got %q want %q", idx, cfg.IdleBehavior.ArgsArray[idx], want[idx])
+		}
+	}
+}
+
+func TestValidateRejectsWindowsIdleBehavior(t *testing.T) {
+	oldGOOS := validationGOOS
+	validationGOOS = "windows"
+	t.Cleanup(func() { validationGOOS = oldGOOS })
+
+	cfg := &Config{
+		WorkerName:    "worker-1",
+		WalletAddress: "XFo27t1JjPjWFmmk558cEWJC8HRjQJuHTRD34nMksE3nR2j6DxuxE3XTeRuVf8c3hqctQNgTWEiYp2AdMK1HunyJ3jb9Nta5W3",
+		PoolURL:       "wss://pool.example.com/ws",
+		MaxCPUThreads: 1,
+		IdleBehavior: IdleBehavior{
+			Enabled: true,
+			Command: "idle-miner.exe",
+		},
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatalf("expected Windows idle_behavior validation error")
+	}
+	if !strings.Contains(err.Error(), "not supported on Windows") {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
 func TestLoadConfigValidationErrors(t *testing.T) {
 	t.Parallel()
 

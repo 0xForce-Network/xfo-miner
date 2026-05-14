@@ -40,18 +40,21 @@ type mockDetachedController struct {
 	currentID int
 	starts    int
 	stops     int
+	lastArgs  []string
+	stopErr   error
 }
 
 func newMockDetachedController() *mockDetachedController {
 	return &mockDetachedController{}
 }
 
-func (m *mockDetachedController) start(_ string, _ []string) (*process.DetachedProcess, error) {
+func (m *mockDetachedController) start(_ string, args []string) (*process.DetachedProcess, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.starts++
 	m.currentID++
 	m.running = true
+	m.lastArgs = append([]string(nil), args...)
 	return &process.DetachedProcess{Pid: m.currentID}, nil
 }
 
@@ -59,6 +62,9 @@ func (m *mockDetachedController) stop(_ int, _ int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stops++
+	if m.stopErr != nil {
+		return m.stopErr
+	}
 	m.running = false
 	return nil
 }
@@ -79,6 +85,18 @@ func (m *mockDetachedController) stopCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.stops
+}
+
+func (m *mockDetachedController) lastStartArgs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.lastArgs...)
+}
+
+func (m *mockDetachedController) setStopErr(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopErr = err
 }
 
 func newMockProcessManager() *mockProcessManager {
@@ -568,10 +586,11 @@ func newTestScheduler() (*Scheduler, *mockProcessManager, *mockPoolClient, *mock
 			BackgroundThreads: 1,
 		},
 		IdleBehavior: config.IdleBehavior{
-			Enabled:        true,
-			GracePeriodSec: 1,
-			Command:        "idle-miner",
-			Args:           "--x",
+			Enabled:            true,
+			GracePeriodSec:     1,
+			RestartCooldownSec: 1,
+			Command:            "idle-miner",
+			Args:               "--x",
 		},
 	}, "0.1.0-test", &env.SystemCapabilities{RunMode: env.RunModeCPUOnly}, proc, pcl, logger)
 
@@ -637,10 +656,11 @@ func newRuntimeProbeScheduler(t *testing.T, poolURL string, poolClient pool.Clie
 			BackgroundThreads: 1,
 		},
 		IdleBehavior: config.IdleBehavior{
-			Enabled:        true,
-			GracePeriodSec: 1,
-			Command:        "idle-miner",
-			Args:           "--x",
+			Enabled:            true,
+			GracePeriodSec:     1,
+			RestartCooldownSec: 1,
+			Command:            "idle-miner",
+			Args:               "--x",
 		},
 	}, "0.1.0-test", &env.SystemCapabilities{RunMode: env.RunModeCPUOnly}, proc, poolClient, logger)
 
@@ -701,6 +721,55 @@ func TestSchedulerTransitionToWPAAudit(t *testing.T) {
 
 	pcl.emit(pool.JobGPUMessage{Type: "job_gpu", JobID: "job1", HashMode: 22000, Target: "hash", Skip: 0, Limit: 1})
 	waitFor(t, func() bool { return detached.stopCount() >= 1 })
+}
+
+func TestSchedulerFailClosedWhenIdleMinerStopFails(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	runner := &capturingHashcatRunner{}
+	s.hashcatRunner = runner
+	detached.setStopErr(errors.New("protected idle miner"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{Type: "job_gpu", JobID: "job-idle-stop-fail", HashMode: 22000, Target: "hash", Skip: 0, Limit: 1})
+
+	waitFor(t, func() bool {
+		result := pcl.latestResult()
+		return result != nil && result.JobID == "job-idle-stop-fail"
+	})
+	result := pcl.latestResult()
+	if result.Status != "idle_miner_stop_failed" {
+		t.Fatalf("expected idle_miner_stop_failed status, got %q", result.Status)
+	}
+	if !strings.Contains(result.Data, "idle_miner_stop_failed") {
+		t.Fatalf("expected failure data to include idle_miner_stop_failed, got %q", result.Data)
+	}
+	if got := runner.RunCount(); got != 0 {
+		t.Fatalf("hashcat must not run after idle miner stop failure, got runs=%d", got)
+	}
+}
+
+func TestSchedulerUsesIdleArgsArray(t *testing.T) {
+	s, _, _, detached := newTestScheduler()
+	s.cfg.IdleBehavior.Args = "--legacy broken"
+	s.cfg.IdleBehavior.ArgsArray = []string{"--pool", "stratum+tcp://pool.example:3333", "--user", "wallet name"}
+
+	if err := s.startIdleMiner(context.Background()); err != nil {
+		t.Fatalf("startIdleMiner() error = %v", err)
+	}
+	args := detached.lastStartArgs()
+	want := []string{"--pool", "stratum+tcp://pool.example:3333", "--user", "wallet name"}
+	if len(args) != len(want) {
+		t.Fatalf("unexpected args length: got %d want %d args=%v", len(args), len(want), args)
+	}
+	for idx := range want {
+		if args[idx] != want[idx] {
+			t.Fatalf("unexpected arg[%d]: got %q want %q", idx, args[idx], want[idx])
+		}
+	}
 }
 
 func TestSchedulerWalletRecoveryCrackedResultCarriesResultKind(t *testing.T) {
@@ -1695,6 +1764,7 @@ var wasmProbeMainUsesChallengeBridgeRuntime = []byte{
 
 func TestSchedulerReturnsToStandbyAfterJob(t *testing.T) {
 	s, _, pcl, detached := newTestScheduler()
+	s.cfg.IdleBehavior.RestartCooldownSec = 1
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1706,6 +1776,26 @@ func TestSchedulerReturnsToStandbyAfterJob(t *testing.T) {
 
 	if s.CurrentState() != StateStandby {
 		t.Fatalf("expected standby after job, got %s", s.CurrentState())
+	}
+}
+
+func TestSchedulerIdleMinerRestoreCooldownCanBeCancelledByNextJob(t *testing.T) {
+	s, _, pcl, detached := newTestScheduler()
+	s.cfg.IdleBehavior.RestartCooldownSec = 2
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return detached.startCount() >= 1 })
+
+	pcl.emit(pool.JobGPUMessage{Type: "job_gpu", JobID: "job-cooldown-1", HashMode: 22000, Target: "hash", Skip: 0, Limit: 1})
+	waitFor(t, func() bool { return s.CurrentState() == StateStandby && detached.stopCount() >= 1 })
+	time.Sleep(250 * time.Millisecond)
+	pcl.emit(pool.JobGPUMessage{Type: "job_gpu", JobID: "job-cooldown-2", HashMode: 22000, Target: "hash", Skip: 0, Limit: 1})
+
+	time.Sleep(1200 * time.Millisecond)
+	if got := detached.startCount(); got != 1 {
+		t.Fatalf("idle miner should not restart before cancelled cooldown expires, starts=%d", got)
 	}
 }
 

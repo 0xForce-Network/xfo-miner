@@ -261,3 +261,130 @@ func TestHashcatRunnerDictionarySliceUsesRuntimePathAndRangeArgs(t *testing.T) {
 		t.Fatalf("expected hashcat args to include --limit 22, args:\n%s", argsText)
 	}
 }
+
+func TestHashcatRunnerMaskSegmentPassesCustomCharsetArgs(t *testing.T) {
+	tempDir := t.TempDir()
+	argsCapturePath := filepath.Join(tempDir, "captured_mask_segment_args.txt")
+
+	fakeHashcatPath := filepath.Join(tempDir, "fake_hashcat_mask_segment.sh")
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		"printf '%s\n' \"$@\" > \"" + argsCapturePath + "\"",
+		"printf 'Status...........: Cracked\n'",
+		"printf 'Plaintext........: 13776512\n'",
+	}, "\n") + "\n"
+	if err := os.WriteFile(fakeHashcatPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake hashcat script: %v", err)
+	}
+
+	targetPath := filepath.Join(tempDir, "sample_mask.hc22000")
+	if err := os.WriteFile(targetPath, []byte("dummy-mask-target"), 0o600); err != nil {
+		t.Fatalf("write target file: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner := NewHashcatRunner(process.NewRealManager(logger), fakeHashcatPath, logger)
+
+	job := &pool.JobGPUMessage{
+		Type:     "job_gpu",
+		JobID:    "job-mask-segment-evidence",
+		HashMode: 22000,
+		Target:   targetPath,
+		Skip:     0,
+		Limit:    100000000,
+		KeyspaceContract: json.RawMessage(`{
+			"type": "mask_segment",
+			"mask": "?1?1?1?1?1?1?1?1",
+			"charset": "0123456789",
+			"custom_charset_1": "0123456789",
+			"skip": 0,
+			"limit": 100000000
+		}`),
+	}
+
+	var result *pool.ResultMessage
+	err := runner.Run(context.Background(), job, nil, func(msg *pool.ResultMessage) {
+		copy := *msg
+		result = &copy
+	})
+	if err != nil {
+		t.Fatalf("HashcatRunner.Run() error = %v", err)
+	}
+	if result == nil || result.Status != "cracked" || result.Data != "13776512" {
+		t.Fatalf("expected cracked 13776512, got %#v", result)
+	}
+
+	argsBytes, err := os.ReadFile(argsCapturePath)
+	if err != nil {
+		t.Fatalf("read args capture: %v", err)
+	}
+	argsText := string(argsBytes)
+	if !strings.Contains(argsText, "-a\n3\n") {
+		t.Fatalf("expected hashcat args to include attack mode 3, args:\n%s", argsText)
+	}
+	if !strings.Contains(argsText, "-1\n0123456789\n") {
+		t.Fatalf("expected hashcat args to define custom charset 1, args:\n%s", argsText)
+	}
+	if !strings.Contains(argsText, targetPath+"\n?1?1?1?1?1?1?1?1\n") {
+		t.Fatalf("expected hashcat args to include target then mask, args:\n%s", argsText)
+	}
+	if !strings.Contains(argsText, "--skip\n0\n") || !strings.Contains(argsText, "--limit\n100000000\n") {
+		t.Fatalf("expected hashcat args to preserve range, args:\n%s", argsText)
+	}
+}
+
+func TestHashcatRunnerRuntimeInvalidArgumentsNotReportedAsExhausted(t *testing.T) {
+	tempDir := t.TempDir()
+	fakeHashcatPath := filepath.Join(tempDir, "fake_hashcat_invalid_args.sh")
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		"set -eu",
+		"echo 'Custom-charset 1 is undefined.' >&2",
+		"exit 255",
+	}, "\n") + "\n"
+	if err := os.WriteFile(fakeHashcatPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake hashcat script: %v", err)
+	}
+
+	targetPath := filepath.Join(tempDir, "sample_invalid_args.hc22000")
+	if err := os.WriteFile(targetPath, []byte("dummy-invalid-args-target"), 0o600); err != nil {
+		t.Fatalf("write target file: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner := NewHashcatRunner(process.NewRealManager(logger), fakeHashcatPath, logger)
+
+	job := &pool.JobGPUMessage{
+		Type:     "job_gpu",
+		JobID:    "job-invalid-args-evidence",
+		HashMode: 22000,
+		Target:   targetPath,
+		Skip:     0,
+		Limit:    100000000,
+		KeyspaceContract: json.RawMessage(`{
+			"type": "mask_segment",
+			"mask": "?1?1?1?1?1?1?1?1",
+			"skip": 0,
+			"limit": 100000000
+		}`),
+	}
+
+	var result *pool.ResultMessage
+	err := runner.Run(context.Background(), job, nil, func(msg *pool.ResultMessage) {
+		copy := *msg
+		result = &copy
+	})
+	if err != nil {
+		t.Fatalf("HashcatRunner.Run() error = %v", err)
+	}
+	if result == nil {
+		t.Fatalf("expected result callback")
+	}
+	if result.Status != "hashcat_unsupported" {
+		t.Fatalf("expected invalid hashcat arguments to be reported as hashcat_unsupported, got %#v", result)
+	}
+	if !strings.Contains(result.Data, HashcatUnsupportedReasonInvalidArguments) {
+		t.Fatalf("expected result data to include invalid argument reason, got %q", result.Data)
+	}
+}

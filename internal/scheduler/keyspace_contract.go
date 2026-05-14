@@ -22,15 +22,21 @@ var (
 var keyspaceJobIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
 type keyspaceContract struct {
-	Type       string   `json:"type"`
-	Candidates []string `json:"candidates,omitempty"`
-	Mask       string   `json:"mask,omitempty"`
-	Skip       *int64   `json:"skip,omitempty"`
-	Limit      *int64   `json:"limit,omitempty"`
+	Type           string   `json:"type"`
+	Candidates     []string `json:"candidates,omitempty"`
+	Mask           string   `json:"mask,omitempty"`
+	Charset        string   `json:"charset,omitempty"`
+	CustomCharset1 string   `json:"custom_charset_1,omitempty"`
+	CustomCharset2 string   `json:"custom_charset_2,omitempty"`
+	CustomCharset3 string   `json:"custom_charset_3,omitempty"`
+	CustomCharset4 string   `json:"custom_charset_4,omitempty"`
+	Skip           *int64   `json:"skip,omitempty"`
+	Limit          *int64   `json:"limit,omitempty"`
 }
 
 type materializedKeyspace struct {
 	AttackMode   *int
+	Options      []string
 	Inputs       []string
 	Skip         int64
 	Limit        int64
@@ -135,6 +141,26 @@ func materializeMaskSegment(keyspace *materializedKeyspace, contract keyspaceCon
 	mask := strings.TrimSpace(contract.Mask)
 	if mask == "" {
 		return nil, fmt.Errorf("%w: mask_segment requires mask", ErrInvalidKeyspaceContract)
+	}
+	customCharsets := []struct {
+		flag  string
+		value string
+		alias string
+	}{
+		{flag: "-1", value: contract.CustomCharset1, alias: contract.Charset},
+		{flag: "-2", value: contract.CustomCharset2},
+		{flag: "-3", value: contract.CustomCharset3},
+		{flag: "-4", value: contract.CustomCharset4},
+	}
+	for idx, customCharset := range customCharsets {
+		value := strings.TrimSpace(customCharset.value)
+		if value == "" && idx == 0 {
+			value = strings.TrimSpace(customCharset.alias)
+		}
+		if value == "" {
+			continue
+		}
+		keyspace.Options = append(keyspace.Options, customCharset.flag, value)
 	}
 
 	if contract.Skip != nil {

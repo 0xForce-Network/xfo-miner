@@ -46,12 +46,59 @@ type identityState struct {
 var hostPlatformExecCommandContext = exec.CommandContext
 var hostPlatformGOOS = runtime.GOOS
 var executablePathNormalizeGOOS = runtime.GOOS
+var validationGOOS = runtime.GOOS
 
 type IdleBehavior struct {
-	Enabled        bool   `json:"enabled"`
-	GracePeriodSec int    `json:"grace_period_sec"`
-	Command        string `json:"command"`
-	Args           string `json:"args"`
+	Enabled            bool     `json:"enabled"`
+	GracePeriodSec     int      `json:"grace_period_sec"`
+	RestartCooldownSec int      `json:"restart_cooldown_sec"`
+	Command            string   `json:"command"`
+	Args               string   `json:"args"`
+	ArgsArray          []string `json:"args_array,omitempty"`
+}
+
+func (i *IdleBehavior) UnmarshalJSON(data []byte) error {
+	type idleBehaviorRaw struct {
+		Enabled            bool            `json:"enabled"`
+		GracePeriodSec     int             `json:"grace_period_sec"`
+		RestartCooldownSec int             `json:"restart_cooldown_sec"`
+		Command            string          `json:"command"`
+		Args               json.RawMessage `json:"args"`
+		ArgsArray          []string        `json:"args_array"`
+	}
+
+	var raw idleBehaviorRaw
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&raw); err != nil {
+		return err
+	}
+
+	*i = IdleBehavior{
+		Enabled:            raw.Enabled,
+		GracePeriodSec:     raw.GracePeriodSec,
+		RestartCooldownSec: raw.RestartCooldownSec,
+		Command:            raw.Command,
+		ArgsArray:          append([]string(nil), raw.ArgsArray...),
+	}
+
+	if len(raw.Args) == 0 || bytes.Equal(bytes.TrimSpace(raw.Args), []byte("null")) {
+		return nil
+	}
+
+	var legacyArgs string
+	if err := json.Unmarshal(raw.Args, &legacyArgs); err == nil {
+		i.Args = legacyArgs
+		return nil
+	}
+
+	var argsArray []string
+	if err := json.Unmarshal(raw.Args, &argsArray); err == nil {
+		i.ArgsArray = append([]string(nil), argsArray...)
+		return nil
+	}
+
+	return errors.New("idle_behavior.args must be a string or an array of strings")
 }
 
 type CPUMiningConfig struct {
@@ -457,6 +504,9 @@ func (c *Config) applyDefaults() error {
 	if c.CPUMining.MaxThreads == 0 {
 		c.CPUMining.MaxThreads = c.MaxCPUThreads
 	}
+	if c.IdleBehavior.Enabled && c.IdleBehavior.RestartCooldownSec == 0 {
+		c.IdleBehavior.RestartCooldownSec = 120
+	}
 
 	return nil
 }
@@ -502,8 +552,19 @@ func (c *Config) Validate() error {
 	if c.IdleBehavior.GracePeriodSec < 0 {
 		validationErrs = append(validationErrs, errors.New("idle_behavior.grace_period_sec cannot be negative"))
 	}
+	if c.IdleBehavior.RestartCooldownSec < 0 {
+		validationErrs = append(validationErrs, errors.New("idle_behavior.restart_cooldown_sec cannot be negative"))
+	}
 	if c.IdleBehavior.Enabled && strings.TrimSpace(c.IdleBehavior.Command) == "" {
 		validationErrs = append(validationErrs, errors.New("idle_behavior.command is required when idle_behavior.enabled is true"))
+	}
+	if c.IdleBehavior.Enabled && validationGOOS == "windows" {
+		validationErrs = append(validationErrs, errors.New("idle_behavior.enabled is not supported on Windows; disable idle_behavior or run the idle miner outside xfo-miner"))
+	}
+	for idx, arg := range c.IdleBehavior.ArgsArray {
+		if strings.TrimSpace(arg) == "" {
+			validationErrs = append(validationErrs, fmt.Errorf("idle_behavior.args_array[%d] cannot be empty", idx))
+		}
 	}
 
 	if c.CPUMining.Enabled {
