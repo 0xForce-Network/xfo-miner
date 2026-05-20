@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,11 +22,15 @@ import (
 )
 
 const (
-	xmrigModeFull        = "full"
-	xmrigModeHeartbeat   = "heartbeat"
-	xmrigProcessName     = "xmrig_l1"
-	xmrigLogRetention    = 72 * time.Hour
-	xmrigActiveLogMaxAge = 24 * time.Hour
+	xmrigModeFull               = "full"
+	xmrigModeHeartbeat          = "heartbeat"
+	xmrigProcessName            = "xmrig_l1"
+	xmrigLogRetention           = 72 * time.Hour
+	xmrigActiveLogMaxAge        = 24 * time.Hour
+	xmrigRejectMonitorInterval  = 30 * time.Second
+	xmrigRejectMonitorCooldown  = 2 * time.Minute
+	xmrigRejectRateThreshold    = 0.10
+	xmrigRejectMonitorMinShares = 20
 )
 
 type xmrigController interface {
@@ -50,6 +55,10 @@ type XMRigManager struct {
 	apiBaseURL             string
 	watchdogInitialBackoff time.Duration
 	watchdogMaxBackoff     time.Duration
+	rejectMonitorInterval  time.Duration
+	rejectMonitorCooldown  time.Duration
+	rejectMonitorThreshold float64
+	rejectMonitorMinShares int
 
 	mu          sync.Mutex
 	currentMode string
@@ -75,6 +84,10 @@ func NewXMRigManager(procManager process.Manager, cfg *config.CPUMiningConfig, s
 		httpClient:             &http.Client{Timeout: 5 * time.Second},
 		watchdogInitialBackoff: time.Second,
 		watchdogMaxBackoff:     30 * time.Second,
+		rejectMonitorInterval:  xmrigRejectMonitorInterval,
+		rejectMonitorCooldown:  xmrigRejectMonitorCooldown,
+		rejectMonitorThreshold: xmrigRejectRateThreshold,
+		rejectMonitorMinShares: xmrigRejectMonitorMinShares,
 		stopCh:                 make(chan struct{}),
 	}
 }
@@ -233,6 +246,7 @@ func (m *XMRigManager) restartWithModeLocked(ctx context.Context, mode string, t
 	m.generation++
 	gen := m.generation
 	go m.watchProcessExit(proc.Done, gen)
+	go m.watchRejectRate(gen)
 
 	m.currentMode = mode
 	m.logger.Info("xmrig mode applied", "mode", mode, "threads", threads, "generation", gen)
@@ -458,6 +472,160 @@ func isXMRigRotatedLogName(name string, base string) bool {
 	}
 	_, err := strconv.ParseInt(stamp, 10, 64)
 	return err == nil
+}
+
+type xmrigShareStats struct {
+	Accepted int
+	Rejected int
+}
+
+func (s xmrigShareStats) Total() int {
+	return s.Accepted + s.Rejected
+}
+
+func (s xmrigShareStats) RejectRate() float64 {
+	total := s.Total()
+	if total <= 0 {
+		return 0
+	}
+	return float64(s.Rejected) / float64(total)
+}
+
+func parseXMRigShareStatsFromLine(line string) (xmrigShareStats, bool) {
+	lower := strings.ToLower(line)
+	if !strings.Contains(lower, "accepted") && !strings.Contains(lower, "rejected") {
+		return xmrigShareStats{}, false
+	}
+
+	remaining := line
+	for {
+		open := strings.Index(remaining, "(")
+		if open < 0 {
+			return xmrigShareStats{}, false
+		}
+		close := strings.Index(remaining[open+1:], ")")
+		if close < 0 {
+			return xmrigShareStats{}, false
+		}
+
+		candidate := remaining[open+1 : open+1+close]
+		parts := strings.Split(candidate, "/")
+		if len(parts) == 2 {
+			rejected, rejectedErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+			total, totalErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if rejectedErr == nil && totalErr == nil && rejected >= 0 && total >= 0 && rejected <= total {
+				return xmrigShareStats{Accepted: total - rejected, Rejected: rejected}, true
+			}
+		}
+
+		remaining = remaining[open+1+close+1:]
+	}
+}
+
+func readXMRigShareStats(logPath string) (xmrigShareStats, bool, error) {
+	logPath = strings.TrimSpace(logPath)
+	if logPath == "" {
+		return xmrigShareStats{}, false, nil
+	}
+
+	f, err := os.Open(filepath.Clean(logPath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return xmrigShareStats{}, false, nil
+		}
+		return xmrigShareStats{}, false, fmt.Errorf("open xmrig log %q: %w", logPath, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	var latest xmrigShareStats
+	found := false
+	for scanner.Scan() {
+		if stats, ok := parseXMRigShareStatsFromLine(scanner.Text()); ok {
+			latest = stats
+			found = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return xmrigShareStats{}, false, fmt.Errorf("read xmrig log %q: %w", logPath, err)
+	}
+
+	return latest, found, nil
+}
+
+func (m *XMRigManager) watchRejectRate(startGen uint64) {
+	interval := m.rejectMonitorInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	cooldown := m.rejectMonitorCooldown
+	if cooldown <= 0 {
+		cooldown = 2 * time.Minute
+	}
+	threshold := m.rejectMonitorThreshold
+	if threshold <= 0 {
+		threshold = xmrigRejectRateThreshold
+	}
+	minShares := m.rejectMonitorMinShares
+	if minShares <= 0 {
+		minShares = xmrigRejectMonitorMinShares
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var lastRestart time.Time
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+		}
+
+		m.mu.Lock()
+		stopped := m.stopped
+		mode := m.currentMode
+		currentGen := m.generation
+		m.mu.Unlock()
+
+		if stopped || mode == "" || currentGen != startGen {
+			return
+		}
+		if !m.procManager.IsRunning(xmrigProcessName) {
+			continue
+		}
+
+		stats, found, err := readXMRigShareStats(m.cfg.XMRigLogPath)
+		if err != nil {
+			m.logger.Warn("xmrig reject-rate monitor failed reading log", "path", m.cfg.XMRigLogPath, "error", err, "generation", startGen)
+			continue
+		}
+		if !found || stats.Total() < minShares || stats.RejectRate() <= threshold {
+			continue
+		}
+		if !lastRestart.IsZero() && time.Since(lastRestart) < cooldown {
+			continue
+		}
+
+		threads := m.cfg.MaxThreads
+		if mode == xmrigModeHeartbeat {
+			threads = m.cfg.BackgroundThreads
+		}
+		restartCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = m.restartWithMode(restartCtx, mode, threads)
+		cancel()
+		if err != nil {
+			m.logger.Warn("xmrig reject-rate restart failed", "mode", mode, "accepted", stats.Accepted, "rejected", stats.Rejected, "reject_rate", stats.RejectRate(), "error", err, "generation", startGen)
+			continue
+		}
+
+		lastRestart = time.Now()
+		m.logger.Warn("xmrig restarted after high reject rate", "mode", mode, "accepted", stats.Accepted, "rejected", stats.Rejected, "reject_rate", stats.RejectRate(), "threshold", threshold, "generation", startGen)
+		return
+	}
 }
 
 func (m *XMRigManager) watchProcessExit(done <-chan struct{}, startGen uint64) {

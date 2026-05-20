@@ -552,6 +552,108 @@ func TestXMRigManagerRejectsReservedExtraArgs(t *testing.T) {
 	}
 }
 
+func TestParseXMRigShareStatsFromRejectedLine(t *testing.T) {
+	t.Parallel()
+
+	stats, ok := parseXMRigShareStatsFromLine(`[stdout] [2026-05-20 10:11:39.886]  cpu      rejected (566/3780) diff 5000 "Unknown miner" (1 ms)`)
+	if !ok {
+		t.Fatalf("expected xmrig rejected line to parse")
+	}
+	if stats.Accepted != 3214 || stats.Rejected != 566 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if rate := stats.RejectRate(); rate <= 0.10 {
+		t.Fatalf("expected reject rate above 10%%, got %f", rate)
+	}
+}
+
+func TestReadXMRigShareStatsUsesLatestShareSummary(t *testing.T) {
+	t.Parallel()
+
+	logPath := filepath.Join(t.TempDir(), "xmrig.log")
+	content := strings.Join([]string{
+		`[stdout] [2026-05-20 10:11:38.100]  cpu      accepted (100/5) diff 5000 (1 ms)`,
+		`[stdout] [2026-05-20 10:11:39.886]  cpu      rejected (566/3780) diff 5000 "Unknown miner" (1 ms)`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write xmrig log: %v", err)
+	}
+
+	stats, found, err := readXMRigShareStats(logPath)
+	if err != nil {
+		t.Fatalf("readXMRigShareStats() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("expected share stats found")
+	}
+	if stats.Accepted != 3214 || stats.Rejected != 566 {
+		t.Fatalf("unexpected latest stats: %+v", stats)
+	}
+}
+
+func TestXMRigRejectRateMonitorRestartsAboveThreshold(t *testing.T) {
+	t.Parallel()
+
+	logPath := filepath.Join(t.TempDir(), "xmrig.log")
+	if err := os.WriteFile(logPath, []byte(`[stdout] [2026-05-20 10:11:39.886]  cpu      rejected (566/3780) diff 5000 "Unknown miner" (1 ms)`+"\n"), 0o600); err != nil {
+		t.Fatalf("write xmrig log: %v", err)
+	}
+
+	pm := newMockProcessManager()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewXMRigManager(pm, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		XMRigLogPath:      logPath,
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+	}, "stratum+tcp://pool.example.com:3333", testWalletAddress, "XFo2A88ABC", "Rig-4090-Alpha", logger)
+	mgr.rejectMonitorInterval = 10 * time.Millisecond
+	mgr.rejectMonitorCooldown = time.Hour
+	mgr.rejectMonitorThreshold = 0.10
+	mgr.rejectMonitorMinShares = 20
+
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	waitFor(t, func() bool {
+		return pm.startCount(xmrigProcessName) >= 2 && pm.stopCount(xmrigProcessName) >= 1
+	})
+}
+
+func TestXMRigRejectRateMonitorIgnoresTenPercentOrLower(t *testing.T) {
+	t.Parallel()
+
+	logPath := filepath.Join(t.TempDir(), "xmrig.log")
+	if err := os.WriteFile(logPath, []byte(`[stdout] [2026-05-20 10:11:39.886]  cpu      rejected (90/10) diff 5000 (1 ms)`+"\n"), 0o600); err != nil {
+		t.Fatalf("write xmrig log: %v", err)
+	}
+
+	pm := newMockProcessManager()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewXMRigManager(pm, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		XMRigLogPath:      logPath,
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+	}, "stratum+tcp://pool.example.com:3333", testWalletAddress, "XFo2A88ABC", "Rig-4090-Alpha", logger)
+	mgr.rejectMonitorInterval = 10 * time.Millisecond
+	mgr.rejectMonitorCooldown = time.Hour
+	mgr.rejectMonitorThreshold = 0.10
+	mgr.rejectMonitorMinShares = 20
+
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	if got := pm.startCount(xmrigProcessName); got != 1 {
+		t.Fatalf("expected no restart at or below 10%% reject rate, starts=%d", got)
+	}
+}
+
 func TestXMRigLogCleanupRemovesOnlyOldLogFamilyMembers(t *testing.T) {
 	t.Parallel()
 
