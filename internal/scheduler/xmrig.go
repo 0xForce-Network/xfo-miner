@@ -511,10 +511,10 @@ func parseXMRigShareStatsFromLine(line string) (xmrigShareStats, bool) {
 		candidate := remaining[open+1 : open+1+close]
 		parts := strings.Split(candidate, "/")
 		if len(parts) == 2 {
-			rejected, rejectedErr := strconv.Atoi(strings.TrimSpace(parts[0]))
-			total, totalErr := strconv.Atoi(strings.TrimSpace(parts[1]))
-			if rejectedErr == nil && totalErr == nil && rejected >= 0 && total >= 0 && rejected <= total {
-				return xmrigShareStats{Accepted: total - rejected, Rejected: rejected}, true
+			accepted, acceptedErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+			rejected, rejectedErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if acceptedErr == nil && rejectedErr == nil && accepted >= 0 && rejected >= 0 {
+				return xmrigShareStats{Accepted: accepted, Rejected: rejected}, true
 			}
 		}
 
