@@ -154,18 +154,19 @@ func (m *mockProcessManager) stopAllCount() int {
 }
 
 type mockPoolClient struct {
-	mu                  sync.Mutex
-	handler             func(string, json.RawMessage)
-	reconnect           func()
-	connected           bool
-	lastLogin           *pool.LoginMessage
-	results             []pool.ResultMessage
-	probeResults        []pool.ProbeResultMessage
-	hashcatProbeResults []pool.HashcatCapabilityProbeResultMessage
-	connectErr          error
-	loginErr            error
-	connects            int
-	logins              int
+	mu                   sync.Mutex
+	handler              func(string, json.RawMessage)
+	reconnect            func()
+	connected            bool
+	lastLogin            *pool.LoginMessage
+	results              []pool.ResultMessage
+	probeResults         []pool.ProbeResultMessage
+	hashcatProbeResults  []pool.HashcatCapabilityProbeResultMessage
+	gpuDiagnosticReports []pool.GPUDiagnosticReportMessage
+	connectErr           error
+	loginErr             error
+	connects             int
+	logins               int
 }
 
 func (m *mockPoolClient) Connect(_ context.Context, _ string) error {
@@ -223,6 +224,14 @@ func (m *mockPoolClient) SendHashcatCapabilityProbeResult(result *pool.HashcatCa
 func (m *mockPoolClient) SendContainerReady(_ *pool.ContainerReadyMessage) error { return nil }
 func (m *mockPoolClient) SendTelemetryL1(_ *pool.TelemetryL1Message) error       { return nil }
 func (m *mockPoolClient) SendTelemetryL2(_ *pool.TelemetryL2Message) error       { return nil }
+func (m *mockPoolClient) SendGPUDiagnosticReport(result *pool.GPUDiagnosticReportMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if result != nil {
+		m.gpuDiagnosticReports = append(m.gpuDiagnosticReports, *result)
+	}
+	return nil
+}
 func (m *mockPoolClient) OnMessage(h func(msgType string, raw json.RawMessage)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -305,6 +314,16 @@ func (m *mockPoolClient) latestHashcatProbeResult() *pool.HashcatCapabilityProbe
 		return nil
 	}
 	copy := m.hashcatProbeResults[len(m.hashcatProbeResults)-1]
+	return &copy
+}
+
+func (m *mockPoolClient) latestGPUDiagnosticReport() *pool.GPUDiagnosticReportMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.gpuDiagnosticReports) == 0 {
+		return nil
+	}
+	copy := m.gpuDiagnosticReports[len(m.gpuDiagnosticReports)-1]
 	return &copy
 }
 
@@ -1846,6 +1865,35 @@ func TestSchedulerLoginCarriesVersionAndOS(t *testing.T) {
 	}
 	if len(login.Devices) != 1 || login.Devices[0].GPUUUID == "" {
 		t.Fatalf("expected stable gpu devices in login, got %+v", login.Devices)
+	}
+}
+
+func TestSchedulerHandlesGPUDiagnosticRequest(t *testing.T) {
+	s, _, pcl, _ := newTestScheduler()
+	requestPayload, err := json.Marshal(pool.GPUDiagnosticRequestMessage{
+		Type:      "gpu_diagnostic_request",
+		RequestID: "diag-1",
+		Reason:    "operator_debug",
+	})
+	if err != nil {
+		t.Fatalf("marshal gpu diagnostic request: %v", err)
+	}
+	s.handleMessage(context.Background(), inboundMessage{msgType: "gpu_diagnostic_request", raw: requestPayload})
+
+	report := pcl.latestGPUDiagnosticReport()
+	if report == nil {
+		t.Fatalf("expected gpu diagnostic report")
+	}
+	if report.Type != "gpu_diagnostic_report" || report.RequestID != "diag-1" || report.Status != "ok" {
+		t.Fatalf("unexpected gpu diagnostic envelope: %+v", report)
+	}
+	miner, ok := report.Report["miner"].(map[string]any)
+	if !ok || miner["version"] != "0.1.0-test" || miner["worker_name"] != "worker-test" {
+		t.Fatalf("unexpected miner diagnostic payload: %+v", report.Report["miner"])
+	}
+	commands, ok := report.Report["commands"].(map[string]any)
+	if !ok || commands["nvidia_smi_query"] == nil || commands["hashcat_info"] == nil {
+		t.Fatalf("expected bounded diagnostic command results, got %+v", report.Report["commands"])
 	}
 }
 

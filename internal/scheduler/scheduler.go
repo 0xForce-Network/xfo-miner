@@ -566,6 +566,13 @@ func (s *Scheduler) handleMessage(ctx context.Context, msg inboundMessage) {
 			return
 		}
 		s.handleHashcatCapabilityProbe(ctx, &probe)
+	case "gpu_diagnostic_request":
+		var req pool.GPUDiagnosticRequestMessage
+		if err := json.Unmarshal(msg.raw, &req); err != nil {
+			s.logger.Warn("invalid gpu_diagnostic_request message", "error", err)
+			return
+		}
+		s.handleGPUDiagnosticRequest(ctx, &req)
 	}
 }
 

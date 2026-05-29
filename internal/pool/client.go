@@ -28,6 +28,7 @@ type Client interface {
 	SendContainerReady(msg *ContainerReadyMessage) error
 	SendTelemetryL1(msg *TelemetryL1Message) error
 	SendTelemetryL2(msg *TelemetryL2Message) error
+	SendGPUDiagnosticReport(msg *GPUDiagnosticReportMessage) error
 	OnMessage(handler func(msgType string, raw json.RawMessage))
 	OnReconnect(handler func())
 }
@@ -381,6 +382,17 @@ func (c *WSSClient) SendTelemetryL2(msg *TelemetryL2Message) error {
 	return c.enqueue(msg)
 }
 
+func (c *WSSClient) SendGPUDiagnosticReport(msg *GPUDiagnosticReportMessage) error {
+	if msg == nil {
+		return errors.New("gpu diagnostic report message is nil")
+	}
+	if msg.Type == "" {
+		msg.Type = "gpu_diagnostic_report"
+	}
+	debuglog.Log("gpu_diagnostic_report_enqueued", "request_id", msg.RequestID, "status", msg.Status, "miner_id", debuglog.CurrentMinerID())
+	return c.enqueue(msg)
+}
+
 func (c *WSSClient) enqueue(msg any) error {
 	payload, err := json.Marshal(msg)
 	if err != nil {
@@ -501,6 +513,10 @@ func (c *NoopClient) SendTelemetryL1(_ *TelemetryL1Message) error {
 }
 
 func (c *NoopClient) SendTelemetryL2(_ *TelemetryL2Message) error {
+	return nil
+}
+
+func (c *NoopClient) SendGPUDiagnosticReport(_ *GPUDiagnosticReportMessage) error {
 	return nil
 }
 

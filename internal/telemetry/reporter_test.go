@@ -46,6 +46,9 @@ func (m *mockTelemetryPoolClient) SendTelemetryL2(msg *pool.TelemetryL2Message) 
 	}
 	return nil
 }
+func (m *mockTelemetryPoolClient) SendGPUDiagnosticReport(_ *pool.GPUDiagnosticReportMessage) error {
+	return nil
+}
 func (m *mockTelemetryPoolClient) OnMessage(_ func(string, json.RawMessage)) {}
 func (m *mockTelemetryPoolClient) OnReconnect(_ func())                      {}
 

@@ -130,10 +130,26 @@ type TelemetryL2Message struct {
 	JobID   string               `json:"job_id,omitempty"`
 }
 
+type GPUDiagnosticReportMessage struct {
+	Type         string         `json:"type"`
+	RequestID    string         `json:"request_id"`
+	Status       string         `json:"status"`
+	Report       map[string]any `json:"report"`
+	ErrorSummary string         `json:"error_summary,omitempty"`
+}
+
 // Pool -> Miner
 type ServerMessage struct {
 	Type string          `json:"type"`
 	Raw  json.RawMessage `json:"-"`
+}
+
+type GPUDiagnosticRequestMessage struct {
+	Type            string   `json:"type"`
+	RequestID       string   `json:"request_id"`
+	Reason          string   `json:"reason,omitempty"`
+	RequestedAt     int64    `json:"requested_at,omitempty"`
+	IncludeCommands []string `json:"include_commands,omitempty"`
 }
 
 type JobGPUMessage struct {
