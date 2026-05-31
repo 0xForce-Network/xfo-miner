@@ -1888,7 +1888,7 @@ func TestSchedulerHandlesGPUDiagnosticRequest(t *testing.T) {
 		t.Fatalf("unexpected gpu diagnostic envelope: %+v", report)
 	}
 	miner, ok := report.Report["miner"].(map[string]any)
-	if !ok || miner["version"] != "0.1.0-test" || miner["worker_name"] != "worker-test" {
+	if !ok || miner["version"] != "0.1.0-test" || miner["worker_name"] != "worker-1" {
 		t.Fatalf("unexpected miner diagnostic payload: %+v", report.Report["miner"])
 	}
 	commands, ok := report.Report["commands"].(map[string]any)

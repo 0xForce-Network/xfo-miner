@@ -582,6 +582,89 @@ func TestParseXMRigShareStatsFromAcceptedLineWithZeroRejected(t *testing.T) {
 	}
 }
 
+func TestParseXMRigShareObservationIncludesDifficulty(t *testing.T) {
+	t.Parallel()
+
+	obs, ok := parseXMRigShareObservationFromLine(`[stdout] [2026-05-21 01:30:00.000]  cpu      accepted (3/0) diff 50000 (1 ms)`)
+	if !ok {
+		t.Fatalf("expected xmrig share observation to parse")
+	}
+	if obs.Accepted != 3 || obs.Rejected != 0 || obs.Diff != 50000 || obs.Kind != "accepted" {
+		t.Fatalf("unexpected observation: %+v", obs)
+	}
+}
+
+func TestSelectAutoSwitchPortUpgradesAtHighDiffCap(t *testing.T) {
+	t.Parallel()
+
+	policy := xmrigPortAutoSwitchPolicy{
+		MinAcceptedDelta: 2,
+		HighDiffSamples:  2,
+		HighDiffRatio:    0.98,
+		Ports: []xmrigStratumPortProfile{
+			{URL: "stratum+tcp://pool.example.com:3333", MinDiff: 100, MaxDiff: 50000},
+			{URL: "stratum+tcp://pool.example.com:5555", MinDiff: 100, MaxDiff: 4000000000},
+		},
+	}
+	observations := []xmrigShareObservation{
+		{Accepted: 1, Rejected: 0, Diff: 50000, Kind: "accepted"},
+		{Accepted: 2, Rejected: 0, Diff: 50000, Kind: "accepted"},
+		{Accepted: 3, Rejected: 0, Diff: 50000, Kind: "accepted"},
+	}
+
+	next, reason, ok := selectAutoSwitchPort(policy, "stratum+tcp://pool.example.com:3333", "stratum+tcp://pool.example.com:3333", observations)
+	if !ok || next != "stratum+tcp://pool.example.com:5555" || reason != "diff_at_high_cap" {
+		t.Fatalf("unexpected switch decision: ok=%v next=%q reason=%q", ok, next, reason)
+	}
+}
+
+func TestSelectAutoSwitchPortDowngradesAtLowDiffFloor(t *testing.T) {
+	t.Parallel()
+
+	policy := xmrigPortAutoSwitchPolicy{
+		MinAcceptedDelta: 3,
+		LowDiffSamples:   3,
+		LowDiffRatio:     1.20,
+		Ports: []xmrigStratumPortProfile{
+			{URL: "stratum+tcp://pool.example.com:3333", MinDiff: 100, MaxDiff: 50000},
+			{URL: "stratum+tcp://pool.example.com:5555", MinDiff: 10000000, MaxDiff: 4000000000},
+		},
+	}
+	observations := []xmrigShareObservation{
+		{Accepted: 1, Rejected: 0, Diff: 10000000, Kind: "accepted"},
+		{Accepted: 2, Rejected: 0, Diff: 10000000, Kind: "accepted"},
+		{Accepted: 3, Rejected: 0, Diff: 10000000, Kind: "accepted"},
+		{Accepted: 4, Rejected: 0, Diff: 10000000, Kind: "accepted"},
+	}
+
+	next, reason, ok := selectAutoSwitchPort(policy, "stratum+tcp://pool.example.com:3333", "stratum+tcp://pool.example.com:5555", observations)
+	if !ok || next != "stratum+tcp://pool.example.com:3333" || reason != "diff_at_low_floor" {
+		t.Fatalf("unexpected switch decision: ok=%v next=%q reason=%q", ok, next, reason)
+	}
+}
+
+func TestSelectAutoSwitchPortEscalatesOnHighRejectRate(t *testing.T) {
+	t.Parallel()
+
+	policy := xmrigPortAutoSwitchPolicy{
+		FailureMinSamples: 10,
+		FailureRejectRate: 0.5,
+		Ports: []xmrigStratumPortProfile{
+			{URL: "stratum+tcp://pool.example.com:3333", MinDiff: 100, MaxDiff: 50000},
+			{URL: "stratum+tcp://pool.example.com:5555", MinDiff: 100, MaxDiff: 4000000000},
+		},
+	}
+	observations := []xmrigShareObservation{
+		{Accepted: 10, Rejected: 0, Diff: 50000, Kind: "accepted"},
+		{Accepted: 12, Rejected: 20, Diff: 50000, Kind: "rejected"},
+	}
+
+	next, reason, ok := selectAutoSwitchPort(policy, "stratum+tcp://pool.example.com:3333", "stratum+tcp://pool.example.com:3333", observations)
+	if !ok || next != "stratum+tcp://pool.example.com:5555" || reason != "high_reject_rate_try_higher_port" {
+		t.Fatalf("unexpected switch decision: ok=%v next=%q reason=%q", ok, next, reason)
+	}
+}
+
 func TestReadXMRigShareStatsUsesLatestShareSummary(t *testing.T) {
 	t.Parallel()
 
