@@ -41,8 +41,11 @@ func (p *ManagedProcess) Start(ctx context.Context) error {
 	if p.started {
 		return fmt.Errorf("process %q already started", p.Name)
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("start process %q canceled: %w", p.Name, err)
+	}
 
-	cmd := exec.CommandContext(ctx, p.Command, p.Args...)
+	cmd := exec.Command(p.Command, p.Args...)
 
 	stdoutReader, stdoutWriter := io.Pipe()
 	stderrReader, stderrWriter := io.Pipe()

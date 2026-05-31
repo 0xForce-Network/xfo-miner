@@ -365,9 +365,9 @@ func TestXMRigManagerWatchdogRetriesRestart(t *testing.T) {
 	mgr.watchdogInitialBackoff = 10 * time.Millisecond
 	mgr.watchdogMaxBackoff = 20 * time.Millisecond
 
-	done := make(chan struct{})
-	go mgr.watchProcessExit(done, 1)
-	close(done)
+	proc := &process.ManagedProcess{Name: "xmrig_l1", Done: make(chan struct{})}
+	go mgr.watchProcessExit(proc, 1)
+	close(proc.Done)
 
 	waitFor(t, func() bool {
 		pm.mu.Lock()
@@ -392,9 +392,9 @@ func TestXMRigWatchdogIgnoresStaleExit(t *testing.T) {
 	mgr.watchdogInitialBackoff = 10 * time.Millisecond
 	mgr.watchdogMaxBackoff = 20 * time.Millisecond
 
-	done := make(chan struct{})
-	go mgr.watchProcessExit(done, 1)
-	close(done)
+	proc := &process.ManagedProcess{Name: "xmrig_l1", Done: make(chan struct{})}
+	go mgr.watchProcessExit(proc, 1)
+	close(proc.Done)
 
 	time.Sleep(40 * time.Millisecond)
 
@@ -421,15 +421,50 @@ func TestXMRigWatchdogRestartsCurrentGenOnly(t *testing.T) {
 	mgr.watchdogInitialBackoff = 10 * time.Millisecond
 	mgr.watchdogMaxBackoff = 20 * time.Millisecond
 
-	done := make(chan struct{})
-	go mgr.watchProcessExit(done, 3)
-	close(done)
+	proc := &process.ManagedProcess{Name: "xmrig_l1", Done: make(chan struct{})}
+	go mgr.watchProcessExit(proc, 3)
+	close(proc.Done)
 
 	waitFor(t, func() bool {
 		pm.mu.Lock()
 		defer pm.mu.Unlock()
 		return pm.starts >= 1
 	})
+}
+
+func TestXMRigWatchdogDelaysRapidExitRestart(t *testing.T) {
+	t.Parallel()
+
+	pm := &flakyProcessManager{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewXMRigManager(pm, &config.CPUMiningConfig{
+		Enabled:           true,
+		XMRigPath:         "xmrig",
+		MaxThreads:        4,
+		BackgroundThreads: 1,
+	}, "stratum+tcp://pool.example:3333", testWalletAddress, "node-1", "worker-1", logger)
+	now := time.Unix(100, 0)
+	sleepCalls := make(chan time.Duration, 1)
+	mgr.currentMode = xmrigModeFull
+	mgr.generation = 1
+	mgr.generationStartedAt[1] = now
+	mgr.now = func() time.Time { return now.Add(time.Second) }
+	mgr.watchdogSleep = func(d time.Duration) { sleepCalls <- d }
+	mgr.watchdogInitialBackoff = time.Millisecond
+	mgr.watchdogMaxBackoff = time.Millisecond
+
+	proc := &process.ManagedProcess{Name: "xmrig_l1", Done: make(chan struct{})}
+	go mgr.watchProcessExit(proc, 1)
+	close(proc.Done)
+
+	select {
+	case got := <-sleepCalls:
+		if got != 4*time.Second {
+			t.Fatalf("sleep delay = %s, want 4s", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected watchdog rapid-exit delay")
+	}
 }
 
 type captureProcessManager struct {
@@ -585,12 +620,16 @@ func TestParseXMRigShareStatsFromAcceptedLineWithZeroRejected(t *testing.T) {
 func TestParseXMRigShareObservationIncludesDifficulty(t *testing.T) {
 	t.Parallel()
 
-	obs, ok := parseXMRigShareObservationFromLine(`[stdout] [2026-05-21 01:30:00.000]  cpu      accepted (3/0) diff 50000 (1 ms)`)
+	obs, ok := parseXMRigShareObservationFromLine(`[stdout] [2026-05-21 01:30:00.000]  cpu      accepted (3/0) diff 50000 (1 ms)`, time.Now())
 	if !ok {
 		t.Fatalf("expected xmrig share observation to parse")
 	}
 	if obs.Accepted != 3 || obs.Rejected != 0 || obs.Diff != 50000 || obs.Kind != "accepted" {
 		t.Fatalf("unexpected observation: %+v", obs)
+	}
+	wantTimestamp := time.Date(2026, 5, 21, 1, 30, 0, 0, time.UTC)
+	if !obs.Timestamp.Equal(wantTimestamp) {
+		t.Fatalf("unexpected timestamp: got %s want %s", obs.Timestamp, wantTimestamp)
 	}
 }
 
@@ -662,6 +701,70 @@ func TestSelectAutoSwitchPortEscalatesOnHighRejectRate(t *testing.T) {
 	next, reason, ok := selectAutoSwitchPort(policy, "stratum+tcp://pool.example.com:3333", "stratum+tcp://pool.example.com:3333", observations)
 	if !ok || next != "stratum+tcp://pool.example.com:5555" || reason != "high_reject_rate_try_higher_port" {
 		t.Fatalf("unexpected switch decision: ok=%v next=%q reason=%q", ok, next, reason)
+	}
+}
+
+func TestSelectAutoSwitchPortIgnoresPreviousXMRigRunAfterCounterReset(t *testing.T) {
+	t.Parallel()
+
+	policy := xmrigPortAutoSwitchPolicy{
+		MinAcceptedDelta: 20,
+		HighDiffSamples:  3,
+		HighDiffRatio:    0.98,
+		Ports: []xmrigStratumPortProfile{
+			{URL: "stratum+tcp://pool.example.com:3333", MinDiff: 100, MaxDiff: 50000},
+			{URL: "stratum+tcp://pool.example.com:5555", MinDiff: 100, MaxDiff: 4000000000},
+		},
+	}
+	observations := []xmrigShareObservation{
+		{Accepted: 507508, Rejected: 937, Diff: 50000, Kind: "accepted"},
+		{Accepted: 1, Rejected: 0, Diff: 50000, Kind: "accepted"},
+		{Accepted: 20, Rejected: 0, Diff: 50000, Kind: "accepted"},
+		{Accepted: 21, Rejected: 0, Diff: 50000, Kind: "accepted"},
+		{Accepted: 22, Rejected: 0, Diff: 50000, Kind: "accepted"},
+	}
+
+	next, reason, ok := selectAutoSwitchPort(policy, "stratum+tcp://pool.example.com:3333", "stratum+tcp://pool.example.com:3333", observations)
+	if !ok || next != "stratum+tcp://pool.example.com:5555" || reason != "diff_at_high_cap" {
+		t.Fatalf("unexpected switch decision after counter reset: ok=%v next=%q reason=%q", ok, next, reason)
+	}
+}
+
+func TestReadXMRigShareObservationsFiltersByLogTimestamp(t *testing.T) {
+	t.Parallel()
+
+	logPath := filepath.Join(t.TempDir(), "xmrig.log")
+	content := strings.Join([]string{
+		`[stdout] [2026-05-31 15:20:00.000]  cpu      accepted (1/0) diff 50000 (239 ms)`,
+		`[stdout] [2026-05-31 15:29:00.000]  cpu      accepted (2/0) diff 50000 (239 ms)`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write xmrig log: %v", err)
+	}
+
+	since := time.Date(2026, 5, 31, 15, 25, 0, 0, time.UTC)
+	observations, err := readXMRigShareObservations(logPath, since)
+	if err != nil {
+		t.Fatalf("readXMRigShareObservations() error = %v", err)
+	}
+	if len(observations) != 1 || observations[0].Accepted != 2 {
+		t.Fatalf("unexpected filtered observations: %+v", observations)
+	}
+}
+
+func TestLatestXMRigRunShareObservationsIgnoresPreviousRun(t *testing.T) {
+	t.Parallel()
+
+	events := []xmrigLogEvent{
+		{RunBoundary: &xmrigLogRunBoundary{Timestamp: time.Date(2026, 5, 31, 16, 0, 0, 0, time.UTC)}},
+		{Observation: &xmrigShareObservation{Accepted: 10, Rejected: 0, Diff: 50000, Kind: "accepted"}},
+		{Observation: &xmrigShareObservation{Accepted: 20, Rejected: 0, Diff: 50000, Kind: "accepted"}},
+		{RunBoundary: &xmrigLogRunBoundary{Timestamp: time.Date(2026, 5, 31, 16, 1, 0, 0, time.UTC)}},
+	}
+
+	observations := latestXMRigRunShareObservations(events)
+	if len(observations) != 0 {
+		t.Fatalf("expected latest run to have no shares yet, got %+v", observations)
 	}
 }
 

@@ -23,7 +23,7 @@ import (
 	"github.com/0xforce/xfo-miner/internal/updater"
 )
 
-var version = "1.0.14"
+var version = "1.0.15"
 var gitCommit = "dev"
 var buildTime = "unknown"
 

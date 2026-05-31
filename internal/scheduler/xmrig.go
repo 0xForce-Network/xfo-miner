@@ -40,6 +40,7 @@ const (
 )
 
 var xmrigShareDiffRegex = regexp.MustCompile(`(?i)\bdiff\s+([0-9]+)\b`)
+var xmrigLogTimestampRegex = regexp.MustCompile(`\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\]`)
 
 type xmrigPortAutoSwitchPolicy struct {
 	Ports             []xmrigStratumPortProfile
@@ -90,13 +91,16 @@ type XMRigManager struct {
 	rejectMonitorThreshold float64
 	rejectMonitorMinShares int
 	portSwitchProbe        func(ctx context.Context, stratumURL string, timeout time.Duration) error
+	now                    func() time.Time
+	watchdogSleep          func(time.Duration)
 
-	mu          sync.Mutex
-	currentMode string
-	currentURL  string
-	generation  uint64
-	stopped     bool
-	stopCh      chan struct{}
+	mu                  sync.Mutex
+	currentMode         string
+	currentURL          string
+	generation          uint64
+	generationStartedAt map[uint64]time.Time
+	stopped             bool
+	stopCh              chan struct{}
 }
 
 func NewXMRigManager(procManager process.Manager, cfg *config.CPUMiningConfig, stratumURL string, walletAddress string, nodeID string, workerName string, logger *slog.Logger) *XMRigManager {
@@ -121,6 +125,9 @@ func NewXMRigManager(procManager process.Manager, cfg *config.CPUMiningConfig, s
 		rejectMonitorThreshold: xmrigRejectRateThreshold,
 		rejectMonitorMinShares: xmrigRejectMonitorMinShares,
 		portSwitchProbe:        probeStratumPort,
+		now:                    time.Now,
+		watchdogSleep:          time.Sleep,
+		generationStartedAt:    make(map[uint64]time.Time),
 		stopCh:                 make(chan struct{}),
 	}
 }
@@ -279,13 +286,14 @@ func (m *XMRigManager) restartWithModeLocked(ctx context.Context, mode string, t
 
 	m.generation++
 	gen := m.generation
-	go m.watchProcessExit(proc.Done, gen)
+	m.generationStartedAt[gen] = m.now()
+	go m.watchProcessExit(proc, gen)
 	go m.watchRejectRate(gen)
 	go m.watchPortAutoSwitch(gen)
 
 	m.currentMode = mode
 	m.currentURL = stratumURL
-	m.logger.Info("xmrig mode applied", "mode", mode, "threads", threads, "stratum_url", stratumURL, "generation", gen)
+	m.logger.Info("xmrig mode applied", "mode", mode, "threads", threads, "stratum_url", stratumURL, "generation", gen, "http_port", m.httpPort, "extra_args", m.cfg.ExtraArgs)
 	return nil
 }
 
@@ -550,6 +558,15 @@ type xmrigShareObservation struct {
 	Kind      string
 }
 
+type xmrigLogRunBoundary struct {
+	Timestamp time.Time
+}
+
+type xmrigLogEvent struct {
+	Observation *xmrigShareObservation
+	RunBoundary *xmrigLogRunBoundary
+}
+
 func (s xmrigShareStats) Total() int {
 	return s.Accepted + s.Rejected
 }
@@ -563,18 +580,19 @@ func (s xmrigShareStats) RejectRate() float64 {
 }
 
 func parseXMRigShareStatsFromLine(line string) (xmrigShareStats, bool) {
-	obs, ok := parseXMRigShareObservationFromLine(line)
+	obs, ok := parseXMRigShareObservationFromLine(line, time.Now())
 	if !ok {
 		return xmrigShareStats{}, false
 	}
 	return xmrigShareStats{Accepted: obs.Accepted, Rejected: obs.Rejected}, true
 }
 
-func parseXMRigShareObservationFromLine(line string) (xmrigShareObservation, bool) {
+func parseXMRigShareObservationFromLine(line string, fallbackTime time.Time) (xmrigShareObservation, bool) {
 	lower := strings.ToLower(line)
 	if !strings.Contains(lower, "accepted") && !strings.Contains(lower, "rejected") {
 		return xmrigShareObservation{}, false
 	}
+	timestamp := parseXMRigLogTimestamp(line, fallbackTime)
 	kind := "accepted"
 	if strings.Contains(lower, "rejected") {
 		kind = "rejected"
@@ -603,12 +621,25 @@ func parseXMRigShareObservationFromLine(line string) (xmrigShareObservation, boo
 			accepted, acceptedErr := strconv.Atoi(strings.TrimSpace(parts[0]))
 			rejected, rejectedErr := strconv.Atoi(strings.TrimSpace(parts[1]))
 			if acceptedErr == nil && rejectedErr == nil && accepted >= 0 && rejected >= 0 {
-				return xmrigShareObservation{Timestamp: time.Now(), Accepted: accepted, Rejected: rejected, Diff: diff, Kind: kind}, true
+				return xmrigShareObservation{Timestamp: timestamp, Accepted: accepted, Rejected: rejected, Diff: diff, Kind: kind}, true
 			}
 		}
 
 		remaining = remaining[open+1+close+1:]
 	}
+}
+
+func parseXMRigLogTimestamp(line string, fallbackTime time.Time) time.Time {
+	matches := xmrigLogTimestampRegex.FindStringSubmatch(line)
+	if len(matches) != 2 {
+		return fallbackTime
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05.000", "2006-01-02 15:04:05"} {
+		if parsed, err := time.ParseInLocation(layout, matches[1], time.UTC); err == nil {
+			return parsed
+		}
+	}
+	return fallbackTime
 }
 
 func readXMRigShareStats(logPath string) (xmrigShareStats, bool, error) {
@@ -646,6 +677,20 @@ func readXMRigShareStats(logPath string) (xmrigShareStats, bool, error) {
 }
 
 func readXMRigShareObservations(logPath string, since time.Time) ([]xmrigShareObservation, error) {
+	events, err := readXMRigLogEvents(logPath, since)
+	if err != nil {
+		return nil, err
+	}
+	observations := make([]xmrigShareObservation, 0, len(events))
+	for _, event := range events {
+		if event.Observation != nil {
+			observations = append(observations, *event.Observation)
+		}
+	}
+	return observations, nil
+}
+
+func readXMRigLogEvents(logPath string, since time.Time) ([]xmrigLogEvent, error) {
 	logPath = strings.TrimSpace(logPath)
 	if logPath == "" {
 		return nil, nil
@@ -663,21 +708,31 @@ func readXMRigShareObservations(logPath string, since time.Time) ([]xmrigShareOb
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
-	observations := []xmrigShareObservation{}
+	events := []xmrigLogEvent{}
+	now := time.Now()
 	for scanner.Scan() {
-		obs, ok := parseXMRigShareObservationFromLine(scanner.Text())
-		if !ok {
+		line := scanner.Text()
+		if obs, ok := parseXMRigShareObservationFromLine(line, now); ok {
+			if !since.IsZero() && obs.Timestamp.Before(since) {
+				continue
+			}
+			events = append(events, xmrigLogEvent{Observation: &obs})
 			continue
 		}
-		if !since.IsZero() && obs.Timestamp.Before(since) {
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "use pool") && !strings.Contains(lower, "pool #1") {
 			continue
 		}
-		observations = append(observations, obs)
+		timestamp := parseXMRigLogTimestamp(line, now)
+		if !since.IsZero() && timestamp.Before(since) {
+			continue
+		}
+		events = append(events, xmrigLogEvent{RunBoundary: &xmrigLogRunBoundary{Timestamp: timestamp}})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read xmrig log %q: %w", logPath, err)
 	}
-	return observations, nil
+	return events, nil
 }
 
 func (m *XMRigManager) watchPortAutoSwitch(startGen uint64) {
@@ -718,15 +773,25 @@ func (m *XMRigManager) watchPortAutoSwitch(startGen uint64) {
 			continue
 		}
 
-		observations, err := readXMRigShareObservations(m.cfg.XMRigLogPath, time.Now().Add(-decisionWindow))
+		events, err := readXMRigLogEvents(m.cfg.XMRigLogPath, time.Now().Add(-decisionWindow))
 		if err != nil {
 			m.logger.Warn("xmrig port auto-switch failed reading log", "path", m.cfg.XMRigLogPath, "error", err, "generation", startGen)
 			continue
 		}
+		observations := latestXMRigRunShareObservations(events)
 		nextURL, reason, ok := selectAutoSwitchPort(policy, m.stratumURL, currentURL, observations)
 		if !ok {
 			continue
 		}
+		m.logger.Info(
+			"xmrig port auto-switch decision",
+			"from", currentURL,
+			"to", nextURL,
+			"reason", reason,
+			"generation", startGen,
+			"observations", len(observations),
+			"summary", summarizeXMRigShareObservations(observations),
+		)
 		if policy.ProbeBeforeSwitch {
 			probeTimeout := policy.ProbeTimeout
 			if probeTimeout <= 0 {
@@ -739,6 +804,7 @@ func (m *XMRigManager) watchPortAutoSwitch(startGen uint64) {
 				m.logger.Warn("xmrig port auto-switch probe failed", "from", currentURL, "to", nextURL, "reason", reason, "error", err)
 				continue
 			}
+			m.logger.Info("xmrig port auto-switch probe succeeded", "from", currentURL, "to", nextURL, "reason", reason, "timeout", probeTimeout)
 		}
 
 		threads := m.cfg.MaxThreads
@@ -763,13 +829,26 @@ func (m *XMRigManager) switchStratumURL(ctx context.Context, mode string, thread
 		return errors.New("empty stratum URL")
 	}
 	m.mu.Lock()
-	m.currentURL = nextURL
+	currentURL := m.currentStratumURLLocked()
 	m.mu.Unlock()
-	if err := m.restartWithMode(ctx, mode, threads); err != nil {
+	if currentURL == nextURL {
+		return nil
+	}
+	if err := m.restartWithModeForURL(ctx, mode, threads, nextURL); err != nil {
 		return err
 	}
 	m.logger.Info("xmrig port auto-switch applied", "stratum_url", nextURL, "reason", reason)
 	return nil
+}
+
+func (m *XMRigManager) restartWithModeForURL(ctx context.Context, mode string, threads int, nextURL string) error {
+	if threads < 1 {
+		return fmt.Errorf("invalid xmrig threads: %d", threads)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentURL = nextURL
+	return m.restartWithModeLocked(ctx, mode, threads)
 }
 
 func fixedPortAutoSwitchPolicy(fallbackURL string) xmrigPortAutoSwitchPolicy {
@@ -868,6 +947,10 @@ func selectAutoSwitchPort(policy xmrigPortAutoSwitchPolicy, fallbackURL string, 
 	if len(observations) == 0 {
 		return "", "", false
 	}
+	observations = latestMonotonicShareObservations(observations)
+	if len(observations) == 0 {
+		return "", "", false
+	}
 
 	first := observations[0]
 	last := observations[len(observations)-1]
@@ -909,6 +992,74 @@ func selectAutoSwitchPort(policy xmrigPortAutoSwitchPolicy, fallbackURL string, 
 		return ports[currentIdx-1].URL, "diff_at_low_floor", true
 	}
 	return "", "", false
+}
+
+func latestMonotonicShareObservations(observations []xmrigShareObservation) []xmrigShareObservation {
+	if len(observations) <= 1 {
+		return observations
+	}
+	start := 0
+	for idx := 1; idx < len(observations); idx++ {
+		prev := observations[idx-1]
+		current := observations[idx]
+		if current.Accepted < prev.Accepted || current.Rejected < prev.Rejected {
+			start = idx
+		}
+	}
+	return observations[start:]
+}
+
+func latestXMRigRunShareObservations(events []xmrigLogEvent) []xmrigShareObservation {
+	if len(events) == 0 {
+		return nil
+	}
+	start := 0
+	for i, event := range events {
+		if event.RunBoundary != nil {
+			start = i + 1
+		}
+	}
+	observations := make([]xmrigShareObservation, 0, len(events)-start)
+	for _, event := range events[start:] {
+		if event.Observation != nil {
+			observations = append(observations, *event.Observation)
+		}
+	}
+	return observations
+}
+
+func summarizeXMRigShareObservations(observations []xmrigShareObservation) map[string]any {
+	observations = latestMonotonicShareObservations(observations)
+	if len(observations) == 0 {
+		return map[string]any{"count": 0}
+	}
+	first := observations[0]
+	last := observations[len(observations)-1]
+	acceptedAtHigh := 0
+	rejected := 0
+	for _, obs := range observations {
+		if obs.Kind == "accepted" && obs.Diff >= 50000 {
+			acceptedAtHigh++
+		}
+		if obs.Kind == "rejected" {
+			rejected++
+		}
+	}
+	return map[string]any{
+		"count":            len(observations),
+		"first_ts":         first.Timestamp.Format(time.RFC3339Nano),
+		"last_ts":          last.Timestamp.Format(time.RFC3339Nano),
+		"first_accepted":   first.Accepted,
+		"last_accepted":    last.Accepted,
+		"accepted_delta":   last.Accepted - first.Accepted,
+		"first_rejected":   first.Rejected,
+		"last_rejected":    last.Rejected,
+		"rejected_delta":   last.Rejected - first.Rejected,
+		"accepted_at_high": acceptedAtHigh,
+		"rejected_samples": rejected,
+		"last_diff":        last.Diff,
+		"last_kind":        last.Kind,
+	}
 }
 
 func probeStratumPort(ctx context.Context, stratumURL string, timeout time.Duration) error {
@@ -1002,14 +1153,61 @@ func (m *XMRigManager) watchRejectRate(startGen uint64) {
 	}
 }
 
-func (m *XMRigManager) watchProcessExit(done <-chan struct{}, startGen uint64) {
-	<-done
+func (m *XMRigManager) watchProcessExit(proc *process.ManagedProcess, startGen uint64) {
+	if proc == nil {
+		return
+	}
+	<-proc.Done
 
 	m.mu.Lock()
 	stopped := m.stopped
 	mode := m.currentMode
 	currentGen := m.generation
+	startedAt := m.generationStartedAt[startGen]
+	if len(m.generationStartedAt) > 32 {
+		for gen := range m.generationStartedAt {
+			if gen+32 < currentGen {
+				delete(m.generationStartedAt, gen)
+			}
+		}
+	}
+	now := m.now
+	sleep := m.watchdogSleep
 	m.mu.Unlock()
+
+	exitErr := proc.Wait()
+	m.logger.Warn(
+		"xmrig process exited",
+		"name", proc.Name,
+		"command", proc.Command,
+		"args", proc.Args,
+		"exit_error", exitErr,
+		"start_generation", startGen,
+		"current_generation", currentGen,
+		"mode", mode,
+		"stopped", stopped,
+	)
+
+	if now == nil {
+		now = time.Now
+	}
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	if !startedAt.IsZero() {
+		uptime := now().Sub(startedAt)
+		if uptime < 5*time.Second {
+			delay := 5*time.Second - uptime
+			m.logger.Warn(
+				"xmrig exited shortly after start; delaying watchdog restart",
+				"uptime", uptime,
+				"delay", delay,
+				"start_generation", startGen,
+				"current_generation", currentGen,
+			)
+			sleep(delay)
+		}
+	}
 
 	if stopped || mode == "" {
 		m.logger.Info(
